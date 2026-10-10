@@ -1474,10 +1474,36 @@
     fsBtn.className = 'btn ghost';
     fsBtn.textContent = '⛶ ' + t('fullscreen');
     fsBtn.onclick = toggleFullscreen;
+    const syncBtn = document.createElement('button');
+    syncBtn.className = 'btn ghost';
+    syncBtn.textContent = '🔄 ' + t('syncSheets');
+    syncBtn.title = t('syncSheets');
+    syncBtn.onclick = async () => {
+      if (syncBtn.disabled) return;
+      syncBtn.disabled = true;
+      syncBtn.textContent = '🔄 ' + t('syncing');
+      try {
+        const s = await api('sync_from_sheets');
+        const m = await api('sync_master_from_sheets');
+        if (!s || !s.ok) throw new Error((s && s.error) || 'sync_from_sheets failed');
+        if (!m || !m.ok) throw new Error((m && m.error) || 'sync_master_from_sheets failed');
+        renderTab(S.nav);
+        toast(tf('syncDoneMsg', {
+          s: s.rows || 0, m: s.months || 0,
+          c: m.customers || 0, st: m.stock || 0, r: m.reps || 0,
+        }));
+      } catch (e) {
+        toast(t('syncFail') + ': ' + (e && e.message || e));
+      } finally {
+        syncBtn.disabled = false;
+        syncBtn.textContent = '🔄 ' + t('syncSheets');
+      }
+    };
     mb.appendChild(brand);
     mb.appendChild(file);
     mb.appendChild(spacer);
     mb.appendChild(langBtn);
+    mb.appendChild(syncBtn);
     mb.appendChild(fsBtn);
   }
 
