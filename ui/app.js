@@ -1277,12 +1277,20 @@
     // 布局基线 = 本次实际应用的列宽/行高/冻结
     S.appliedLayouts[layKey] = { w: finalWidths, h: appliedH, fz: appliedFz };
     // 回放用户修饰（只写样式，不动数值），随后记录样式基线（供定时差分捕获后续修饰）
+    // 保护：样式条目太多时跳过回放，避免卡死（用户可手动清除）
     const userSt = S.userStyles[layKey] || {};
-    Object.entries(userSt).forEach(([k, styleObj]) => {
-      const parts = k.split(':');
-      const ri = Number(parts[0]), ci = Number(parts[1]);
-      try { sh.getRange(ri, ci, 1, 1).setValues([[{ s: styleObj }]]); } catch (e) { /* ignore */ }
-    });
+    const styleKeys = Object.keys(userSt);
+    if (styleKeys.length > 500) {
+      console.warn('[fmt] too many saved styles (' + styleKeys.length + '), skip replay for ' + layKey);
+      delete S.userStyles[layKey];
+      try { trackSave(api('set_pref', 'userStyles', JSON.stringify(S.userStyles))); } catch (e) {}
+    } else {
+      Object.entries(userSt).forEach(([k, styleObj]) => {
+        const parts = k.split(':');
+        const ri = Number(parts[0]), ci = Number(parts[1]);
+        try { sh.getRange(ri, ci, 1, 1).setValues([[{ s: styleObj }]]); } catch (e) { /* ignore */ }
+      });
+    }
     S.appliedStyles[layKey] = captureCellStyles(sh);
     __t('replayUserFmt');   // 用户样式回放+基线+冻结合计
     // 激活目标表并强制视图重绑：页签栏已隐藏，切换渲染面只能靠程序保证（activate + resize）
@@ -3105,7 +3113,20 @@
       } catch (e) { S.sheetLayouts = {}; }
     }
     if (meta.prefs && meta.prefs.userStyles) {
-      try { S.userStyles = JSON.parse(meta.prefs.userStyles) || {}; } catch (e) { S.userStyles = {}; }
+      try {
+        S.userStyles = JSON.parse(meta.prefs.userStyles) || {};
+        // 启动时清理：单个表的样式条目太多就丢弃，避免回放卡死
+        let cleaned = false;
+        Object.keys(S.userStyles).forEach((k) => {
+          if (Object.keys(S.userStyles[k] || {}).length > 500) {
+            delete S.userStyles[k];
+            cleaned = true;
+          }
+        });
+        if (cleaned) {
+          try { trackSave(api('set_pref', 'userStyles', JSON.stringify(S.userStyles))); } catch (e) {}
+        }
+      } catch (e) { S.userStyles = {}; }
     }
     if (meta.prefs && meta.prefs.salesPageSize !== undefined) {
       S.pageSize = Number(meta.prefs.salesPageSize);
