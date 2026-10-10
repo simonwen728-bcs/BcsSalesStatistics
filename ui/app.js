@@ -410,19 +410,20 @@
   // 远程版：pywebview 不可用时走 HTTP POST /api/<method>
   async function api(method) {
     var args = Array.prototype.slice.call(arguments, 1);
-    // 如果桥接有该方法，走桥接（pywebview 本地版）
-    if (BRIDGE && BRIDGE[method]) {
+    // 如果在 pywebview 宿主中且桥接有该方法，走桥接（本地版）
+    // 远程版（USING_MOCK=true，无 pywebview）一律走 HTTP，不用 mock
+    if (!USING_MOCK && BRIDGE && BRIDGE[method]) {
       const r = await BRIDGE[method].apply(BRIDGE, args);
       if (typeof r === 'string') {
         try { return JSON.parse(r); } catch (e) { return r; }
       }
       return r;
     }
-    // 否则走 HTTP（远程版）
+    // 否则走 HTTP（远程版）：body 为 {"args": [...]}
     const resp = await fetch('/api/' + method, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(args[0] || {}),
+      body: JSON.stringify({ args: args }),
     });
     const text = await resp.text();
     try { return JSON.parse(text); } catch (e) { return text; }
