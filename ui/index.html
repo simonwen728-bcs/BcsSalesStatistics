@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>BCS Sales Statistics</title>
+  <!-- ===== Univer 0.6.9 UMD offline assets (order per official docs + verified deps) ===== -->
+  <script>
+    window.__errors = []
+    window.addEventListener('error', (e) => window.__errors.push(e.message + ' @ ' + (e.filename || '') + ':' + e.lineno))
+    window.addEventListener('unhandledrejection', (e) => window.__errors.push('PROMISE: ' + String((e.reason && e.reason.stack) || e.reason)))
+  </script>
+  <script src="react.js?v=7"></script>
+  <script src="react-dom.js?v=7"></script>
+  <script>
+    // React 18 UMD compat shims (from Univer official docs)
+    ;(function (global) {
+      'use strict'
+      if (!global.ReactDOM) return
+      const ReactDOM = global.ReactDOM
+      if (!ReactDOM.createRoot) {
+        ReactDOM.createRoot = function (container) {
+          return { render: (element) => { ReactDOM.render(element, container) } }
+        }
+      }
+    })(this)
+    ;(function (global) {
+      'use strict'
+      if (!global.React || (global.React.jsx && global.React.jsxs)) return
+      const React = global.React
+      const REACT_ELEMENT_TYPE = Symbol.for('react.element')
+      const hasOwnProperty = Object.prototype.hasOwnProperty
+      const RESERVED_PROPS = { key: true, ref: true, __self: true, __source: true }
+      const ReactCurrentOwner = React.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED.ReactCurrentOwner
+      function createReactElement(type, config, maybeKey) {
+        const props = {}
+        let key = null
+        let ref = null
+        if (config.key !== undefined) key = `${config.key}`
+        if (config.ref !== undefined) ref = config.ref  // ref 必须保留对象（字符串化会让 React 提交 ref 时崩溃）
+        for (var propName in config) {
+          if (hasOwnProperty.call(config, propName) && !RESERVED_PROPS.hasOwnProperty(propName)) {
+            props[propName] = config[propName]
+          }
+        }
+        return { $$typeof: REACT_ELEMENT_TYPE, type, key, ref, props, _owner: ReactCurrentOwner.current }
+      }
+      React.jsx = createReactElement
+      React.jsxs = createReactElement
+    })(this)
+  </script>
+  <script src="rxjs.js?v=7"></script>
+  <script src="echarts.js?v=7"></script>
+  <script src="redi.js?v=7"></script>
+  <script src="redi-react.js?v=7"></script>
+  <script src="core.js?v=7"></script>
+  <script src="telemetry.js?v=7"></script>
+  <script src="network.js?v=7"></script>
+  <script src="rpc.js?v=7"></script>
+  <script src="design.js?v=7"></script>
+  <script src="engine-render.js?v=7"></script>
+  <script src="engine-numfmt.js?v=7"></script>
+  <script src="engine-formula.js?v=7"></script>
+  <script src="drawing.js?v=7"></script>
+  <script src="ui.js?v=7"></script>
+  <script src="docs.js?v=7"></script>
+  <script src="docs-ui.js?v=7"></script>
+  <script src="sheets.js?v=7"></script>
+  <script src="sheets-ui.js?v=7"></script>
+  <script src="sheets-formula.js?v=7"></script>
+  <script src="sheets-formula-ui.js?v=7"></script>
+  <script src="sheets-numfmt.js?v=7"></script>
+  <script src="sheets-numfmt-ui.js?v=7"></script>
+  <script src="core.facade.js?v=7"></script>
+  <script src="engine-formula.facade.js?v=7"></script>
+  <script src="ui.facade.js?v=7"></script>
+  <script src="docs-ui.facade.js?v=7"></script>
+  <script src="sheets.facade.js?v=7"></script>
+  <script src="sheets-ui.facade.js?v=7"></script>
+  <script src="sheets-formula.facade.js?v=7"></script>
+  <script src="sheets-numfmt.facade.js?v=7"></script>
+  <script src="design.locale.en.js?v=7"></script>
+  <script src="ui.locale.en.js?v=7"></script>
+  <script src="sheets.locale.en.js?v=7"></script>
+  <script src="sheets-ui.locale.en.js?v=7"></script>
+  <script src="docs-ui.locale.en.js?v=7"></script>
+  <script src="sheets-formula-ui.locale.en.js?v=7"></script>
+  <script src="sheets-numfmt-ui.locale.en.js?v=7"></script>
+  <script src="design.locale.zh.js?v=7"></script>
+  <script src="ui.locale.zh.js?v=7"></script>
+  <script src="sheets.locale.zh.js?v=7"></script>
+  <script src="sheets-ui.locale.zh.js?v=7"></script>
+  <script src="docs-ui.locale.zh.js?v=7"></script>
+  <script src="sheets-formula-ui.locale.zh.js?v=7"></script>
+  <script src="sheets-numfmt-ui.locale.zh.js?v=7"></script>
+  <link rel="stylesheet" href="design.css?v=7" />
+  <link rel="stylesheet" href="ui.css?v=11" />
+  <link rel="stylesheet" href="docs-ui.css?v=11" />
+  <link rel="stylesheet" href="sheets-ui.css?v=11" />
+  <link rel="stylesheet" href="sheets-formula-ui.css?v=11" />
+  <link rel="stylesheet" href="sheets-numfmt-ui.css?v=11" />
+  <script src="i18n.js?v=13"></script>
+  <script src="stats2.js?v=7"></script>
+  <script src="xlsx.full.min.js?v=1"></script>
+  <script src="webimport.js?v=1"></script>
+  <script src="app2.js?v=6"></script>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; padding: 0; }
+    body {
+      display: flex; flex-direction: column; overflow: hidden; height: 100%;
+      font-family: "Segoe UI", "Microsoft YaHei", sans-serif; font-size: 13px; color: #1c2733; background: #f4f6f9;
+    }
+    /* ===== top bar ===== */
+    #menubar {
+      flex: none; height: 46px; display: flex; align-items: center; gap: 4px; padding: 0 12px;
+      background: #1f2d3d; color: #e8eefc; user-select: none; position: relative; z-index: 60;
+    }
+    #menubar .brand { font-weight: 600; font-size: 14px; margin-right: 14px; letter-spacing: .3px; }
+    .menu-item { padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 13px; position: relative; }
+    .menu-item:hover, .menu-item.open { background: #35496e; }
+    .menu-spacer { flex: 1; }
+    .dropdown {
+      display: none; position: absolute; top: 100%; left: 0; min-width: 280px;
+      background: #fff; color: #1c2733; border: 1px solid #d7dee8; border-radius: 8px;
+      box-shadow: 0 8px 24px rgba(15, 30, 60, .18); padding: 6px; z-index: 100;
+    }
+    .menu-item.open .dropdown { display: block; }
+    .dd-item { padding: 8px 12px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+    .dd-item:hover { background: #eef3fb; }
+    .dd-sep { height: 1px; background: #e3e9f1; margin: 5px 4px; }
+    /* ===== buttons ===== */
+    .btn {
+      height: 28px; padding: 0 12px; border: 1px solid #c9d4e3; border-radius: 6px;
+      background: #fff; color: #1c2733; cursor: pointer; font-size: 12.5px; align-items: center;
+    }
+    .btn:hover { background: #eef3fb; }
+    .btn.primary { background: #2456a6; border-color: #2456a6; color: #fff; }
+    .btn.primary:hover { background: #2d69c4; }
+    .btn.ghost { background: transparent; border-color: #3d4d68; color: #e8eefc; height: 28px; }
+    .btn.ghost:hover { background: #35496e; }
+    .btn.sm { height: 24px; padding: 0 8px; font-size: 12px; }
+    .btn.danger { color: #b3261e; border-color: #e4b5b2; }
+    .btn.danger:hover { background: #fbeeec; }
+    /* ===== shell: sidebar + main ===== */
+    #shell { flex: 1 1 auto; min-height: 0; display: flex; }
+    #sidebar {
+      flex: none; width: 172px; background: #182230; color: #b9c7db; overflow-y: auto; overflow-x: hidden;
+      padding: 8px 0 20px; user-select: none; transition: width .15s ease;
+    }
+    #sidebar.collapsed { width: 46px; }
+    #sidebar.collapsed .nav-group, #sidebar.collapsed .nav-head, #sidebar.collapsed .nav-children { display: none; }
+    .nav-head {
+      display: flex; align-items: center; gap: 6px; padding: 10px 12px 5px; cursor: pointer;
+      font-size: 11px; letter-spacing: 1px; color: #6c7f9c; user-select: none;
+    }
+    .nav-head:hover { color: #9fb2cc; }
+    .nav-head .chev { font-size: 9px; width: 10px; display: inline-block; }
+    #sidebar.collapsed .nav-item { padding: 9px 0; text-align: center; font-size: 15px; border-left: none; }
+    .nav-toggle {
+      display: block; width: 100%; height: 30px; margin-bottom: 4px; border: none;
+      background: transparent; color: #6c7f9c; cursor: pointer; font-size: 14px; text-align: center;
+    }
+    .nav-toggle:hover { background: #223349; color: #e8eefc; }
+    .nav-group { padding: 14px 14px 5px; font-size: 11px; letter-spacing: 1px; color: #6c7f9c; }
+    .nav-item {
+      padding: 8px 14px; cursor: pointer; font-size: 13px; border-left: 3px solid transparent;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .nav-item:hover { background: #223349; color: #e8eefc; }
+    .nav-item.active { background: #24406b; color: #fff; border-left-color: #4f8bff; }
+    main { flex: 1 1 auto; min-height: 0; min-width: 0; position: relative; }
+    .page { display: none; height: 100%; padding: 10px 12px; overflow: auto; flex-direction: column; }
+    #page-stats, #page-stat, #page-dashboard { padding: 10px 12px; }
+    /* ===== condition card (横向流式：字段一行排开，放不下才换行) ===== */
+    .cond-card {
+      flex: none; background: #fff; border: 1px solid #dfe6ef; border-radius: 8px;
+      padding: 10px 12px; margin-bottom: 10px;
+    }
+    .cond-title { font-weight: 600; font-size: 13.5px; color: #2c3e57; margin-bottom: 8px; }
+    .cond-fields, .cond-body { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
+    .cond-item { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: #44536a; }
+    .cond-row { display: flex; align-items: center; gap: 6px; }
+    .cond-fields input, .cond-row input, .cond-fields select, .cond-row select {
+      height: 28px; padding: 0 8px; border: 1px solid #c9d4e3; border-radius: 6px; font-size: 12.5px;
+    }
+    .cond-fields input[type="date"], .cond-row input[type="date"] { width: 140px; }
+    .cond-fields input[type="text"], .cond-row input[type="text"], .cond-fields input[type="number"], .cond-row input[type="number"] { width: 140px; }
+    .cond-fields .chk, .cond-row .chk { display: flex; align-items: center; gap: 6px; font-size: 12.5px; }
+    .cond-actions { display: flex; align-items: center; gap: 8px; }
+    .cond-actions .info { color: #5a6b83; font-size: 12px; }
+    .toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+    .toolbar input[type="text"], .toolbar input[type="search"] {
+      height: 28px; width: 200px; padding: 0 10px; border: 1px solid #c9d4e3; border-radius: 6px; font-size: 13px;
+    }
+    .toolbar .info { color: #5a6b83; font-size: 12px; }
+    .pager { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+    .pager span { font-size: 12.5px; color: #44536a; }
+    /* ===== tables ===== */
+    .table-wrap { flex: 1 1 auto; min-height: 0; overflow: auto; }
+    table.grid { min-width: 100%; background: #fff; }
+    table.grid th, table.grid td {
+      border: 1px solid #e2e8f1; padding: 5px 9px; font-size: 12.5px; text-align: left;
+      max-width: 420px; min-width: 48px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    table.grid th { background: #eef3fb; position: sticky; top: 0; z-index: 5; font-weight: 600; }
+    table.grid tbody tr:nth-child(even) { background: #fafcfe; }
+    table.grid tbody tr:hover { background: #f0f6ff; }
+    table.grid td.num, table.grid th.num { text-align: right; font-variant-numeric: tabular-nums; }
+    table.grid td.empty { text-align: center; color: #8a99b0; padding: 24px 0; }
+    .section-title { font-weight: 600; margin: 10px 0 6px; color: #2c3e57; }
+    /* ===== stats list pages ===== */
+    #page-stat { display: none; }
+    .hub-tabs { flex: none; display: flex; gap: 4px; padding: 0 4px; border-bottom: 2px solid #dfe6ef; }
+    .hub-tab {
+      padding: 8px 20px; cursor: pointer; font-size: 13px; color: #44536a; user-select: none;
+      background: transparent; border: 1px solid transparent; border-bottom: none;
+      border-radius: 8px 8px 0 0; position: relative; top: 2px;
+    }
+    .hub-tab:hover { color: #1f4e78; }
+    .hub-tab.active { background: #fff; border-color: #dfe6ef; color: #1f4e78; font-weight: 600; }
+    .wb-block { flex: none; }
+    #univerMount { flex: 1 1 auto; min-height: 0; height: auto; position: relative; background: #fff; border: 1px solid #dfe6ef; border-radius: 8px; overflow: hidden; }
+    #univerMount .univer-app, #univerMount > div { height: 100%; }
+    .stat-empty { padding: 32px 0; text-align: center; color: #8a99b0; }
+    .stat-info { flex: none; white-space: pre-line; font-size: 12.5px; color: #44536a; background: #eef3fb; border: 1px solid #d7dee8; border-radius: 6px; padding: 7px 12px; margin-bottom: 8px; }
+    .stat-summary { flex: none; display: flex; flex-wrap: wrap; gap: 6px 14px; margin-bottom: 8px; }
+    .stat-summary .chip { background: #fff; border: 1px solid #dfe6ef; border-radius: 14px; padding: 3px 12px; font-size: 12px; color: #44536a; }
+    .stat-summary .chip b { color: #1f4e78; font-weight: 600; margin-right: 4px; }
+    table.stat-list td { font-variant-numeric: tabular-nums; }
+    tr.totals td { font-weight: 600; background: #f2f6fb; }
+    /* ===== fuzzy query dropdown（模糊查询，输入停止后弹出，最多 20 条） ===== */
+    .fuzzy-wrap { position: relative; display: inline-flex; }
+    .fuzzy-pop {
+      display: none; position: absolute; top: calc(100% + 2px); left: 0; min-width: 280px; max-width: 420px;
+      max-height: 262px; overflow-y: auto; background: #fff; border: 1px solid #c9d4e3; border-radius: 6px;
+      box-shadow: 0 8px 22px rgba(15, 30, 60, .18); z-index: 150;
+    }
+    .fuzzy-pop.show { display: block; }
+    .fuzzy-item { padding: 6px 10px; font-size: 12.5px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .fuzzy-item:hover, .fuzzy-item.act { background: #e3edfb; }
+    .fuzzy-item .sub { color: #8a99b0; margin-left: 8px; }
+    .fuzzy-empty { padding: 8px 10px; color: #8a99b0; font-size: 12px; }
+    /* ===== customer trends dashboard（1竖2横：左客户列表 / 右上动态双表 / 右下趋势图） ===== */
+    #page-dashboard { gap: 8px; }
+    .dash-grid { flex: 1 1 auto; min-height: 0; display: flex; gap: 10px; }
+    .dash-panel {
+      display: flex; flex-direction: column; min-width: 0; background: #fff;
+      border: 1px solid #dfe6ef; border-radius: 8px; overflow: hidden;
+    }
+    #dash-left { flex: 0 0 34%; }
+    .dash-right-col { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+    #dash-analysis-panel { flex: 0 0 45%; }
+    #dash-chart-panel { flex: 1 1 auto; }
+    .panel-title { flex: none; padding: 8px 12px; font-weight: 600; font-size: 12.5px; background: #eef3fb; color: #2c3e57; }
+    .dash-head-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+    .dash-range { display: flex; align-items: center; font-weight: 400; font-size: 12px; color: #44536a; }
+    .dash-cust { font-weight: 600; color: #1f4e78; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .panel-scroll { flex: 1 1 auto; overflow: auto; }
+    .ana-tables { display: flex; gap: 16px; align-items: flex-start; padding: 8px; flex-wrap: wrap; }
+    .ana-tables > div { flex: 1 1 240px; min-width: 220px; }
+    #dash-trend table.grid th, #dash-trend table.grid td { min-width: 56px; padding: 4px 7px; font-variant-numeric: tabular-nums; }
+    #dash-chart { flex: 1 1 auto; min-height: 0; }
+    #dash-list tr[data-dc] { cursor: pointer; }
+    .dash-search { margin-left: 8px; padding: 4px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 12px; width: 160px; }
+    .dash-head-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    #dash-list tr.sel td { background: #dbe9ff !important; font-weight: 600; }
+    #dash-trend tr.totals td { font-weight: 600; background: #f2f6fb; }
+    #dash-trend table.grid td.num, #dash-trend table.grid th.num { text-align: right; }
+    .seg { display: flex; gap: 4px; }
+    /* ===== modal & toast ===== */
+    .modal-wrap {
+      position: fixed; inset: 0; background: rgba(20, 30, 50, .45); z-index: 200;
+      display: flex; align-items: flex-start; justify-content: center; padding-top: 90px;
+    }
+    .modal {
+      width: 560px; max-width: 92vw; max-height: 76vh; overflow: auto; background: #fff; border-radius: 10px;
+      box-shadow: 0 18px 48px rgba(10, 25, 60, .3);
+    }
+    .modal-title {
+      display: flex; justify-content: space-between; align-items: center; padding: 12px 16px;
+      font-weight: 600; font-size: 14px; border-bottom: 1px solid #eef1f6;
+    }
+    .modal-x { border: none; background: none; font-size: 18px; cursor: pointer; color: #7a8aa2; }
+    .modal-body { padding: 14px 16px; }
+    .modal-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid #eef1f6; }
+    .confirm-text { font-size: 13.5px; line-height: 1.6; padding: 4px 2px; }
+    .form .form-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+    .form .form-row > span { width: 150px; flex: none; color: #44536a; font-size: 12.5px; }
+    .form .form-row input, .form .form-row select {
+      flex: 1; height: 30px; padding: 0 9px; border: 1px solid #c9d4e3; border-radius: 6px; font-size: 13px; min-width: 0;
+    }
+    .form .form-row.full { width: 100%; }
+    .form .form-row .chk { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+    /* ===== loading 反馈 ===== */
+    .loadbar { position: fixed; top: 0; left: 0; height: 3px; width: 0; background: #4f8bff; z-index: 400; opacity: 0; transition: width .25s ease, opacity .3s ease; pointer-events: none; }
+    .loadbar.on { opacity: 1; width: 82%; }
+    .loadbar.done { opacity: 0; width: 100%; }
+    .loading-overlay {
+      position: absolute; inset: 0; z-index: 30; display: flex; flex-direction: column; gap: 10px;
+      align-items: center; justify-content: center; background: rgba(255, 255, 255, .72);
+    }
+    .loading-overlay .spin { width: 30px; height: 30px; border: 3px solid #d7e3f6; border-top-color: #2456a6; border-radius: 50%; animation: spin .8s linear infinite; }
+    .loading-overlay .txt { font-size: 12.5px; color: #44536a; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #toast {
+      position: fixed; right: 18px; bottom: 18px; background: #22334d; color: #fff; padding: 10px 16px;
+      border-radius: 8px; font-size: 13px; opacity: 0; transform: translateY(8px); transition: all .25s; z-index: 300;
+      pointer-events: none; max-width: 60vw;
+    }
+    #toast.show { opacity: 1; transform: none; }
+    #status {
+      position: fixed; left: 10px; bottom: 6px; font-size: 11px; color: #93a2b8; z-index: 50; pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="menubar"></div>
+  <div id="shell">
+    <nav id="sidebar"></nav>
+    <main>
+      <section class="page" id="page-sheet">
+        <div id="wb-sales" class="wb-block" style="display:none">
+        <div class="toolbar">
+          <button class="btn primary" id="sales-import" data-i18n="importSales"></button>
+          <button class="btn" id="sales-delmonth" data-i18n="delByMonth"></button>
+          <button class="btn sm" id="sales-edit" data-i18n="edit" disabled></button>
+          <span class="info" id="sales-info"></span>
+          <div class="pager">
+            <button class="btn sm" id="sales-prev">‹</button>
+            <span id="sales-page"></span>
+            <button class="btn sm" id="sales-next">›</button>
+          </div>
+        </div>
+        <div class="cond-card">
+          <div class="cond-fields">
+            <label class="cond-item"><span data-i18n="fltDate"></span>:</label>
+            <input type="date" id="f-start" />
+            <span>–</span>
+            <input type="date" id="f-end" />
+            <span class="qbtns">
+              <button class="btn sm" id="q-lastyear" data-i18n="quickLY"></button>
+              <button class="btn sm" id="q-thisyear" data-i18n="quickTY"></button>
+              <button class="btn sm" id="q-ttm" data-i18n="quickTTM"></button>
+              <select id="f-year" class="sel"></select>
+            </span>
+            <label class="cond-item"><span data-i18n="custName"></span>:</label>
+            <input type="text" id="f-custname" autocomplete="off" />
+            <label class="cond-item"><span data-i18n="colItemNo"></span>:</label>
+            <input type="text" id="f-itemno" autocomplete="off" />
+            <label class="cond-item"><span data-i18n="colDesc"></span>:</label>
+            <input type="text" id="f-desc" autocomplete="off" />
+            <label class="cond-item"><span data-i18n="colType"></span>:</label>
+            <input type="text" id="f-type" autocomplete="off" />
+            <label class="cond-item"><span data-i18n="colColor"></span>:</label>
+            <input type="text" id="f-color" autocomplete="off" />
+            <label class="cond-item"><span data-i18n="colInvoice"></span>:</label>
+            <input type="text" id="f-inv" autocomplete="off" />
+            <label class="cond-item"><span data-i18n="colRep1"></span>:</label>
+            <input type="text" id="f-rep1" autocomplete="off" />
+            <button class="btn primary" id="sales-query" data-i18n="btnQuery"></button>
+            <button class="btn" id="sales-reset" data-i18n="btnReset"></button>
+          </div>
+        </div>
+      </div>
+        <div id="wb-customers" class="wb-block" style="display:none">
+        <div class="toolbar">
+          <input type="search" id="cust-search" data-i18n-ph="search" />
+          <button class="btn primary" id="cust-add" data-i18n="add"></button>
+          <button class="btn" id="cust-import" data-i18n="importBtn"></button>
+          <button class="btn sm" id="cust-edit" data-i18n="edit" disabled></button>
+          <button class="btn sm danger" id="cust-del" data-i18n="delete" disabled></button>
+          <span class="info" id="cust-count"></span>
+        </div>
+      </div>
+        <div id="wb-inventory" class="wb-block" style="display:none">
+        <div class="toolbar">
+          <input type="search" id="inv-search" data-i18n-ph="search" />
+          <button class="btn primary" id="inv-add" data-i18n="add"></button>
+          <button class="btn" id="inv-import" data-i18n="importBtn"></button>
+          <button class="btn sm" id="inv-edit" data-i18n="edit" disabled></button>
+          <button class="btn sm danger" id="inv-del" data-i18n="delete" disabled></button>
+          <span class="info" id="inv-count"></span>
+        </div>
+      </div>
+        <div id="wb-reps" class="wb-block" style="display:none">
+        <div class="stat-info" data-i18n="repsHint"></div>
+        <div class="toolbar">
+          <span class="info" data-i18n="repsS1"></span>
+          <button class="btn sm primary" id="reps-add-s1" data-i18n="add"></button>
+          <span class="info" data-i18n="repsS2"></span>
+          <button class="btn sm primary" id="reps-add-s2" data-i18n="add"></button>
+          <button class="btn sm" id="reps-edit" data-i18n="edit" disabled></button>
+          <button class="btn sm danger" id="reps-del" data-i18n="delete" disabled></button>
+        </div>
+      </div>
+<div id="wb-history" class="wb-block" style="display:none">
+        <div class="toolbar">
+          <button class="btn danger" id="hist-del-sel" data-i18n="delSelected" disabled></button>
+          <span class="info" data-i18n="histSelectHint"></span>
+        </div>
+        <div class="table-wrap" id="hist-table"></div>
+      </div>
+        <div id="wb-stat" class="wb-block" style="display:none">
+        <div class="cond-card">
+          <div class="cond-title" id="stat-cond-title"></div>
+          <div class="cond-fields" id="stat-cond-fields"></div>
+          <div class="cond-actions" id="stat-actions"></div>
+        </div>
+        <div id="stat-extra"></div>
+      </div><div id="univerMount"></div>
+      </section>
+      <section class="page" id="page-dashboard">
+        <div class="dash-grid">
+          <div class="dash-panel" id="dash-left">
+            <div class="panel-title dash-head-row">
+              <span id="dash-list-title" data-i18n="dashList"></span>
+              <input type="text" id="dash-search" class="dash-search" data-i18n-ph="dashSearchPh" placeholder="">
+              <span class="dash-range"><span data-i18n="dashRange"></span>&nbsp;<span id="dash-periods" class="seg"></span></span>
+            </div>
+            <div class="panel-scroll" id="dash-list"></div>
+          </div>
+          <div class="dash-right-col">
+            <div class="dash-panel" id="dash-analysis-panel">
+              <div class="panel-title dash-head-row">
+                <span data-i18n="dashAnalysis"></span>
+                <span id="dash-cust-title" class="dash-cust"></span>
+              </div>
+              <div class="panel-scroll" id="dash-trend"></div>
+            </div>
+            <div class="dash-panel" id="dash-chart-panel">
+              <div class="panel-title" id="dash-chart-title" data-i18n="dashTrend12"></div>
+              <div id="dash-chart"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+  <div id="loadbar" class="loadbar"></div>
+  <div id="toast"></div>
+  <div id="status"></div>
+</body>
+</html>
