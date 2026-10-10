@@ -429,6 +429,16 @@
     try { return JSON.parse(text); } catch (e) { return text; }
   }
 
+  // 格式写死的报表：不保存/不回放用户样式修改（避免卡死）
+  const NO_STYLE_SAVE = new Set(['categoryQuery']);
+  function skipStyleSave() {
+    try {
+      const nav = S.nav || '';
+      const id = nav.startsWith('r:') ? nav.slice(2) : nav;
+      return NO_STYLE_SAVE.has(id);
+    } catch (e) { return false; }
+  }
+
   // ================= state =================
   const S = {
     nav: 'sales',
@@ -943,8 +953,9 @@
       });
       const fzChanged = JSON.stringify(fz) !== JSON.stringify(base.fz || null);
       // ---- 单元格样式差分（与渲染完成基线比） ----
+      // 写死格式的报表跳过样式保存
       let stylesChanged = false;
-      const baseStyles = S.appliedStyles[layName];
+      const baseStyles = skipStyleSave() ? null : S.appliedStyles[layName];
       if (baseStyles) {
         const live = captureCellStyles(sh);
         const user = S.userStyles[layKeySafe(layName)] || {};
@@ -1231,8 +1242,9 @@
       finalWidths.push(w);
     }
     // 应用记忆布局（列宽+行高）：该表被用户调整过就优先用用户的设定。兼容旧数组格式（仅列宽）。
+    // 写死格式的报表跳过记忆布局，直接用代码指定的列宽
     const layKey = String(spec.sheet || '');
-    const savedRaw = S.sheetLayouts[layKey];
+    const savedRaw = skipStyleSave() ? null : S.sheetLayouts[layKey];
     const savedLay = Array.isArray(savedRaw) ? { w: savedRaw, h: {} } : (savedRaw || null);
     if (savedLay && savedLay.w && savedLay.w.length) {
       const lim = Math.min(savedLay.w.length, sh.getMaxColumns());
@@ -1278,7 +1290,8 @@
     S.appliedLayouts[layKey] = { w: finalWidths, h: appliedH, fz: appliedFz };
     // 回放用户修饰（只写样式，不动数值），随后记录样式基线（供定时差分捕获后续修饰）
     // 保护：样式条目太多时跳过回放，避免卡死（用户可手动清除）
-    const userSt = S.userStyles[layKey] || {};
+    // 写死格式的报表直接跳过回放
+    const userSt = skipStyleSave() ? {} : (S.userStyles[layKey] || {});
     const styleKeys = Object.keys(userSt);
     if (styleKeys.length > 500) {
       console.warn('[fmt] too many saved styles (' + styleKeys.length + '), skip replay for ' + layKey);
@@ -2122,7 +2135,7 @@
     // 自适应列宽（全量内容，小表不用采样），用户记忆值优先
     const unitW = (v) => { let w = 0; for (const ch of String(v === null || v === undefined ? '' : v)) w += ch.charCodeAt(0) > 255 ? 2 : 1; return w; };
     const layKey = name;
-    const savedRaw = S.sheetLayouts[layKey];
+    const savedRaw = skipStyleSave() ? null : S.sheetLayouts[layKey];
     const savedLay = Array.isArray(savedRaw) ? { w: savedRaw, h: {} } : (savedRaw || null);
     const finalWidths = [];
     for (let c = 0; c < nc; c++) {
