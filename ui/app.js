@@ -410,7 +410,8 @@
   // 远程版：pywebview 不可用时走 HTTP POST /api/<method>
   async function api(method) {
     var args = Array.prototype.slice.call(arguments, 1);
-    // 如果是真实 pywebview 桥接且有该方法，走桥接（本地 exe 版）
+    // 如果在 pywebview 宿主中且桥接有该方法，走桥接（本地版）
+    // 远程版（USING_MOCK=true，无 pywebview）一律走 HTTP，不用 mock
     if (!USING_MOCK && BRIDGE && BRIDGE[method]) {
       const r = await BRIDGE[method].apply(BRIDGE, args);
       if (typeof r === 'string') {
@@ -418,7 +419,7 @@
       }
       return r;
     }
-    // 否则走 HTTP（远程网页版）
+    // 否则走 HTTP（远程版）：body 为 {"args": [...]}
     const resp = await fetch('/api/' + method, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -426,6 +427,20 @@
     });
     const text = await resp.text();
     try { return JSON.parse(text); } catch (e) { return text; }
+  }
+
+  // 格式写死的报表：不保存/不回放用户样式修改（避免卡死）
+  const NO_STYLE_SAVE = new Set(['categoryQuery']);
+  function skipStyleSave() {
+    try {
+      const nav = S.nav || '';
+      const id = nav.startsWith('r:') ? nav.slice(2) : nav;
+      if (NO_STYLE_SAVE.has(id)) return true;
+      // 兜底：检查当前渲染的表名
+      const sheet = S.lastRenderedSheet || '';
+      if (sheet && /分类|category/i.test(sheet)) return true;
+      return false;
+    } catch (e) { return false; }
   }
 
   // ================= state =================
@@ -942,8 +957,9 @@
       });
       const fzChanged = JSON.stringify(fz) !== JSON.stringify(base.fz || null);
       // ---- 单元格样式差分（与渲染完成基线比） ----
+      // 写死格式的报表跳过样式保存
       let stylesChanged = false;
-      const baseStyles = S.appliedStyles[layName];
+      const baseStyles = skipStyleSave() ? null : S.appliedStyles[layName];
       if (baseStyles) {
         const live = captureCellStyles(sh);
         const user = S.userStyles[layKeySafe(layName)] || {};
@@ -1223,15 +1239,22 @@
       const u = unitW(row[c]);
       if (u > colUnits[c]) colUnits[c] = u;
     }
+    // 写死列宽：写死格式的报表（NO_STYLE_SAVE）直接用 spec.widths，不走自适应
+    const hardW = {};
+    if (skipStyleSave() && Array.isArray(spec.widths)) spec.widths.forEach(([col, w0]) => {
+      const ci = Number(col) - 1, ww = Number(w0);
+      if (ci >= 0 && ci < nc && ww >= 40) hardW[ci] = ww;
+    });
     const finalWidths = [];
     for (let c = 0; c < nc; c++) {
-      const w = Math.max(56, Math.min(420, Math.round(colUnits[c] * 8.4 * 1.25) + 26));
+      const w = (c in hardW) ? hardW[c] : Math.max(56, Math.min(420, Math.round(colUnits[c] * 8.4 * 1.25) + 26));
       try { sh.setColumnWidth(c, w); } catch (e) { /* ignore */ }
       finalWidths.push(w);
     }
     // 应用记忆布局（列宽+行高）：该表被用户调整过就优先用用户的设定。兼容旧数组格式（仅列宽）。
+    // 写死格式的报表跳过记忆布局，直接用代码指定的列宽
     const layKey = String(spec.sheet || '');
-    const savedRaw = S.sheetLayouts[layKey];
+    const savedRaw = skipStyleSave() ? null : S.sheetLayouts[layKey];
     const savedLay = Array.isArray(savedRaw) ? { w: savedRaw, h: {} } : (savedRaw || null);
     if (savedLay && savedLay.w && savedLay.w.length) {
       const lim = Math.min(savedLay.w.length, sh.getMaxColumns());
@@ -1276,12 +1299,21 @@
     // 布局基线 = 本次实际应用的列宽/行高/冻结
     S.appliedLayouts[layKey] = { w: finalWidths, h: appliedH, fz: appliedFz };
     // 回放用户修饰（只写样式，不动数值），随后记录样式基线（供定时差分捕获后续修饰）
-    const userSt = S.userStyles[layKey] || {};
-    Object.entries(userSt).forEach(([k, styleObj]) => {
-      const parts = k.split(':');
-      const ri = Number(parts[0]), ci = Number(parts[1]);
-      try { sh.getRange(ri, ci, 1, 1).setValues([[{ s: styleObj }]]); } catch (e) { /* ignore */ }
-    });
+    // 保护：样式条目太多时跳过回放，避免卡死（用户可手动清除）
+    // 写死格式的报表直接跳过回放
+    const userSt = skipStyleSave() ? {} : (S.userStyles[layKey] || {});
+    const styleKeys = Object.keys(userSt);
+    if (styleKeys.length > 500) {
+      console.warn('[fmt] too many saved styles (' + styleKeys.length + '), skip replay for ' + layKey);
+      delete S.userStyles[layKey];
+      try { trackSave(api('set_pref', 'userStyles', JSON.stringify(S.userStyles))); } catch (e) {}
+    } else {
+      Object.entries(userSt).forEach(([k, styleObj]) => {
+        const parts = k.split(':');
+        const ri = Number(parts[0]), ci = Number(parts[1]);
+        try { sh.getRange(ri, ci, 1, 1).setValues([[{ s: styleObj }]]); } catch (e) { /* ignore */ }
+      });
+    }
     S.appliedStyles[layKey] = captureCellStyles(sh);
     __t('replayUserFmt');   // 用户样式回放+基线+冻结合计
     // 激活目标表并强制视图重绑：页签栏已隐藏，切换渲染面只能靠程序保证（activate + resize）
@@ -1716,7 +1748,6 @@
     saveBtn.textContent = '💾 ' + t('miSave') + ' (Ctrl+S)';   // 快捷键直接标在按钮上，使用者不用查
     saveBtn.title = t('manualSavedTip');
     saveBtn.onclick = manualSave;
-    // 远程版：从 Google Sheets 同步数据
     const syncBtn = document.createElement('button');
     syncBtn.className = 'btn ghost';
     syncBtn.textContent = '🔄 ' + t('syncSheets');
@@ -1748,6 +1779,7 @@
     mb.appendChild(syncBtn);
     mb.appendChild(saveBtn);
     mb.appendChild(langBtn);
+    mb.appendChild(syncBtn);
     mb.appendChild(fsBtn);
   }
 
@@ -2113,7 +2145,7 @@
     // 自适应列宽（全量内容，小表不用采样），用户记忆值优先
     const unitW = (v) => { let w = 0; for (const ch of String(v === null || v === undefined ? '' : v)) w += ch.charCodeAt(0) > 255 ? 2 : 1; return w; };
     const layKey = name;
-    const savedRaw = S.sheetLayouts[layKey];
+    const savedRaw = skipStyleSave() ? null : S.sheetLayouts[layKey];
     const savedLay = Array.isArray(savedRaw) ? { w: savedRaw, h: {} } : (savedRaw || null);
     const finalWidths = [];
     for (let c = 0; c < nc; c++) {
@@ -3104,7 +3136,20 @@
       } catch (e) { S.sheetLayouts = {}; }
     }
     if (meta.prefs && meta.prefs.userStyles) {
-      try { S.userStyles = JSON.parse(meta.prefs.userStyles) || {}; } catch (e) { S.userStyles = {}; }
+      try {
+        S.userStyles = JSON.parse(meta.prefs.userStyles) || {};
+        // 启动时清理：单个表的样式条目太多就丢弃，避免回放卡死
+        let cleaned = false;
+        Object.keys(S.userStyles).forEach((k) => {
+          if (Object.keys(S.userStyles[k] || {}).length > 500) {
+            delete S.userStyles[k];
+            cleaned = true;
+          }
+        });
+        if (cleaned) {
+          try { trackSave(api('set_pref', 'userStyles', JSON.stringify(S.userStyles))); } catch (e) {}
+        }
+      } catch (e) { S.userStyles = {}; }
     }
     if (meta.prefs && meta.prefs.salesPageSize !== undefined) {
       S.pageSize = Number(meta.prefs.salesPageSize);
