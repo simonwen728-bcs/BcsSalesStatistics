@@ -682,11 +682,14 @@ window.STATS = (function () {
     spec.bold.push(rng(totalRowNo, 1, totalRowNo, totalCols));
     spec.bg.push({ range: rng(totalRowNo, 1, totalRowNo, totalCols), color: '#d9e6f3' });
     spec.bold.push(rng(1, 1, 2, totalCols));
-    spec.bg.push({ range: rng(1, 1, 2, totalCols), color: '#d9e6f3' });
-    spec.align.push({ range: 'D3:' + colLetter(totalCols) + totalRowNo, horiz: 'right' });
-    spec.widths = [[1, 125], [2, 135], [3, 230], [4, 115]];
-    for (let c = yearStartCol; c <= ytdCol; c++) spec.widths.push([c, 105]);
-    for (let c = monthStartCol; c <= totalCols; c++) spec.widths.push([c, 95]);
+    spec.bg.push({ range: rng(1, 1, 2, totalCols), color: '#D9E8F5' });
+    spec.align.push({ range: rng(1, 1, 2, totalCols), horiz: 'center' });
+    // 数据区对齐：金额表右齐，数量表居中（D列起所有数字列）
+    spec.align.push({ range: 'D3:' + colLetter(totalCols) + totalRowNo, horiz: mode === 'qty' ? 'center' : 'right' });
+    // 列宽写死（用户截图要求）：A=100, B=100, C=200, D-H(合计/年/TTM)=120, I起月列=100
+    spec.widths = [[1, 100], [2, 100], [3, 200], [4, 120]];
+    for (let c = yearStartCol; c <= ytdCol; c++) spec.widths.push([c, 120]);
+    for (let c = monthStartCol; c <= totalCols; c++) spec.widths.push([c, 100]);
     spec.freeze = { rows: 2, cols: 3 };
     return spec;
   }
