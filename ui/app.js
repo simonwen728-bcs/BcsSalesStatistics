@@ -97,7 +97,9 @@
   function makeMockBridge() {
     let D = null;
     try { D = JSON.parse(localStorage.getItem('bcs_mock_data') || 'null'); } catch (e) { /* ignore */ }
-    if (!D || D.version !== 1) D = makeDemoData();
+    // 默认空库：exe 启动时 pywebview 桥接注入前的 mock 阶段会用这份数据渲染第一屏，
+    // 若默认演示数据会在真机上闪出"残留数据"（载入演示仅经菜单显式触发）
+    if (!D || D.version !== 1) D = { version: 1, batches: [], sales: [], customers: [], stock: [], reps: { s1: [], s2: [] }, lang: 'en' };
     const persist = () => { try { localStorage.setItem('bcs_mock_data', JSON.stringify(D)); } catch (e) { /* ignore */ } };
     let snap = null; // 备份快照（浏览器模拟用）
     const matches = (r, fields, q) => {
@@ -113,6 +115,7 @@
         return { lang: D.lang || 'en', prefs: mockPrefs, sales: D.sales.length, batches: D.batches.length, customers: D.customers.length, stock: D.stock.length };
       },
       async set_pref(key, value) { mockPrefs[key] = value; persistPrefs(); return 'ok'; },
+      async close_app() { return 'ok'; },
       async set_lang(lang) { D.lang = lang; persist(); return 'ok'; },
       async query_sales(offset, limit, filters) {
         let f = filters || {};
@@ -131,7 +134,10 @@
         if (f.invoice) list = list.filter((r) => String(r.invoice || '').toLowerCase().includes(String(f.invoice).toLowerCase()));
         if (f.itemNo) list = list.filter((r) => String(r.itemNo || '').toLowerCase().includes(String(f.itemNo).toLowerCase()));
         list = list.slice().sort(byMonthDesc);
-        return { total: list.length, rows: list.slice(offset, offset + limit) };
+        const page = list.slice(offset, offset + Math.min(limit, 60000));
+        const cols = ['id', 'month', 'itemNo', 'description', 'color', 'type', 'soldDate', 'invoice',
+          'custNo', 'custName', 'rep1', 'rep1Name', 'rep2', 'rep2Name', 'qty', 'amount', 'cost'];
+        return { total: list.length, cols, rows: page.map((r) => cols.map((k) => r[k] === undefined ? '' : r[k])) };
       },
       async update_sale(id, fieldsJson) {
         const r = D.sales.find((x) => x.id === id);
@@ -203,7 +209,9 @@
       },
       async get_stats_context(start, end) {
         const sales = D.sales.filter((r) => (!start || r.soldDate >= start) && (!end || r.soldDate <= end));
-        return { sales, reps: D.reps, stock: D.stock,
+        const cols = ['month', 'itemNo', 'description', 'color', 'type', 'soldDate', 'invoice',
+          'custNo', 'custName', 'rep1', 'rep2', 'qty', 'amount', 'cost'];
+        return { cols, rows: sales.map((r) => cols.map((k) => r[k])), reps: D.reps, stock: D.stock,
           customers: D.customers.map((c) => ({ no: c.no, name: c.name, city: c.city, state: c.state,
             phone: c.phone, contact: c.contact, type: c.type, email: c.email, sales1: c.sales1 || '', created: c.created || '' })) };
       },
@@ -218,6 +226,9 @@
       },
       async get_lookup_data() {
         const uniq = (arr) => Array.from(new Set(arr.filter(Boolean)));
+        const reps = [...D.reps.s1, ...D.reps.s2].filter((r) => !r.deleted)
+          .map((r) => ({ code: r.code, name: r.name || '' }));
+        const cities = uniq(D.customers.map((c) => String(c.city || '').trim())).sort();
         return {
           items: uniq(D.sales.map((r) => String(r.itemNo || '').trim())).sort().slice(0, 20000)
             .map((code) => ({ code, name: (D.sales.find((r) => String(r.itemNo || '').trim() === code) || {}).description || '' })),
@@ -226,6 +237,8 @@
           invoices: uniq(D.sales.map((r) => String(r.invoice || '').trim())).sort().reverse().slice(0, 20000),
           types: uniq(D.sales.map((r) => String(r.type || '').trim())).sort(),
           colors: uniq(D.sales.map((r) => String(r.color || '').trim())).sort(),
+          reps,
+          cities,
         };
       },
       async export_sheet_xlsx(payloadJson) {
@@ -267,8 +280,9 @@
       },
       async apply_master_import(json) {
         const p = JSON.parse(json);
-        if (p.customers && p.customers.length) D.customers = p.customers;
-        if (p.stock && p.stock.length) D.stock = p.stock;
+        // 与 store 语义一致：字段显式传入即覆盖（空数组=清空），未传入则不动
+        if ('customers' in p) D.customers = p.customers || [];
+        if ('stock' in p) D.stock = p.stock || [];
         // 销售分组只增量：新代码补入；已有代码的姓名/组别仅在为空时补，永不清空、永不覆盖
         const inc = (kind, list) => (list || []).forEach((r) => {
           const hit = D.reps[kind].find((x) => x.code === r.code);
@@ -384,26 +398,15 @@
     };
   }
 
-  // 单机网页版:HTTP 桥接(替换 pywebview)。后端是本机 Python server.py。
-  // 原 30MB 级 get_stats_context 经 pywebview ExecuteScriptAsync 注入会卡死渲染器;
-  // 走 HTTP+gzip 后 53,500 行约 1~2 秒完成,不再冻住。
-  const HTTP_BRIDGE = new Proxy({}, {
-    get: (_t, method) => async (...args) => {
-      const resp = await fetch('/api/' + method, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ args }),
-      });
-      let data = null;
-      try { data = await resp.json(); } catch (e) { /* ignore */ }
-      if (!resp.ok) throw new Error((data && data.error) || ('HTTP ' + resp.status));
-      return data;
-    },
-  });
-  BRIDGE = HTTP_BRIDGE;
-  USING_MOCK = false;
+  if (window.pywebview && window.pywebview.api) {
+    BRIDGE = window.pywebview.api;
+  } else {
+    // 浏览器开发模式先挂 Mock；若实际运行在 pywebview 宿主中，boot 时会重新检测并切换到真实桥接
+    BRIDGE = makeMockBridge();
+    USING_MOCK = true;
+  }
 
-  // 统一调用:python 侧返回 JSON 字符串时自动解析(HTTP 版直接返回对象,保留兼容)
+  // 统一调用：python 侧返回 JSON 字符串时自动解析
   async function api(method) {
     const r = await BRIDGE[method].apply(BRIDGE, Array.prototype.slice.call(arguments, 1));
     if (typeof r === 'string') {
@@ -419,11 +422,16 @@
     statOpts: {},          // 每个统计报表记住上次的条件
     statResults: {},       // 每个统计报表缓存最近一次结果（列表式）
     statSheetName: {},     // 报表ID → 其专属工作表名（缓存清空后仍能把视图切回自己的表）
+    yearToggle: null,      // 年度销售总表折叠状态（点击年份行切换该年月份行显示）
     statTriggered: {},     // 报表ID → 最近触发的功能按钮文字（置灰标记，指示当前表格来源）
     sheetLayouts: {},      // 工作表名 → {w:列宽[], h:行高{行号:高}, fz:冻结}（用户调整的布局自动记忆，重启恢复）
     userStyles: {},        // 工作表名 → {"行:列": 样式对象}（用户手工修饰的单元格格式差异，重启恢复）
     appliedStyles: {},     // 工作表名 → 渲染+回放完成时的样式基线（定时差分用）
     isRendering: false,    // renderSpec 进行中标志（定时快照避让）
+    dataToken: 0,          // 数据变更计数（导航时表内容未变则跳过重渲染，毫秒级切换）
+    sheetToken: {},        // 工作表名 → 渲染时对应的 (dataToken+查询条件)，用于跳过重渲染
+    lastRenderedSheet: '', // 最近渲染的表（切换/渲染前/关闭时只同步它，避免全表扫描卡顿）
+    pendingSaves: [],      // 进行中的异步保存（关闭前 __flushMemory 等它们全部落库）
     appliedLayouts: {},    // 工作表名 → 本会话最后一次应用的列宽（快照基线，仅内存）
     hubTab: {},            // 每个大模块页当前选中的报表选项卡
     sheetCtx: null,        // 当前工作表数据上下文 {kind, rows, startRow, colCount}
@@ -439,7 +447,8 @@
     u: null,               // Univer 工作簿实例（统计报表以 Excel 表格呈现）
     sidebarCollapsed: false,
     navCollapsed: new Set(),
-    dash: { period: 'ALL', customerNo: '', cache: null, chart: null },
+    dash: { period: 'ALL', customerNo: '', cache: null, chart: null, rowMap: {} },
+    dashEngines: null,     // 客户动态两块面板各自的 Univer 实例（懒加载）
   };
 
   function setStatus(msg) { const el = $('#status'); if (el) el.textContent = msg; }
@@ -458,6 +467,36 @@
   // 展示用：0 / 无数据显示为空（不要单独显示 0、0.00）
   function fmtMoneyZ(v) { return Number(v) === 0 ? '' : fmtMoney(v); }
 
+  // 桥接返回的 gz 压缩包解压（>1MB 的查询结果走 gzip+base64 传输）
+  async function gunzipJson(res) {
+    if (!res || !res.gz) return res;
+    const bin = atob(res.gz);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+    const parsed = JSON.parse(await new Response(stream).text());
+    return Object.assign({}, res, { gz: undefined }, parsed);
+  }
+
+  // 行数组还原成对象数组（cols/rows 瘦身格式；兼容旧对象格式）
+  function rowsToObjects(res, listKey) {
+    if (!res || !res.cols || !res.rows) return res;
+    const cols = res.cols;
+    const list = res.rows.map((arr) => { const o = {}; cols.forEach((k, i) => { o[k] = arr[i]; }); return o; });
+    delete res.rows;   // 注意：先 delete 源键再赋值——listKey 为 'rows' 时顺序颠倒会把转换结果删掉
+    delete res.cols;
+    res[listKey] = list;
+    return res;
+  }
+
+  async function normalizeCtx(res) {
+    return rowsToObjects(await gunzipJson(res), 'sales');
+  }
+
+  async function normalizeQuery(res) {
+    return rowsToObjects(await gunzipJson(res), 'rows');
+  }
+
   // ================= get_stats_context 缓存（数据变更后由 invalidateCtx 失效） =================
   function getCtx(start, end) {
     const key = (start || '') + '|' + (end || '');
@@ -467,7 +506,7 @@
   function putCtx(start, end, data) {
     S.ctxCache = { key: (start || '') + '|' + (end || ''), data };
   }
-  function invalidateCtx() { S.ctxCache = null; }
+  function invalidateCtx() { S.ctxCache = null; S.dataToken++; }
 
   // ================= loading 反馈 =================
   function loadBar(on) {
@@ -708,8 +747,9 @@
 
   // ================= statistics =================
   // ================= Univer integration（统计报表以 Excel 工作表呈现） =================
-  function initUniver() {
-    if (S.u) return;
+  // Univer 应用工厂：工作台主画布与客户动态两块面板（列表/分析）共用同一套插件注册。
+  // 一个画布一次只显示一张工作表，所以左右面板各需一个独立实例。
+  function makeUniverApp(containerId) {
     const { LocaleType, merge, Univer, UniverInstanceType } = UniverCore;
     const { FUniver } = UniverCoreFacade;
     const { UniverRenderEnginePlugin } = UniverEngineRender;
@@ -741,7 +781,7 @@
     });
     univer.registerPlugin(UniverRenderEnginePlugin);
     univer.registerPlugin(UniverFormulaEnginePlugin);
-    univer.registerPlugin(UniverUIPlugin, { container: 'univerMount' });
+    univer.registerPlugin(UniverUIPlugin, { container: containerId });
     univer.registerPlugin(UniverDocsPlugin);
     univer.registerPlugin(UniverDocsUIPlugin);
     univer.registerPlugin(UniverSheetsPlugin);
@@ -751,7 +791,12 @@
     univer.registerPlugin(UniverSheetsNumfmtPlugin);
     univer.registerPlugin(UniverSheetsNumfmtUIPlugin);
     univer.createUnit(UniverInstanceType.UNIVER_SHEET, {});
-    S.u = { api: FUniver.newAPI(univer) };
+    return { univer, api: FUniver.newAPI(univer) };
+  }
+
+  function initUniver() {
+    if (S.u) return;
+    S.u = makeUniverApp('univerMount');
     // 单元格点击 → 行选中（数据管理页的行操作依赖它）
     try {
       const api = S.u.api;
@@ -774,7 +819,9 @@
         setTimeout(() => {
           try {
             const wb2 = S.u.api.getActiveWorkbook();
-            const sh2 = wb2.getSheets()[0];
+            // 多表时代：从「最近渲染的表」读选区（getSheets()[0] 会读到别的功能表）
+            const nm = (S.yearToggle && S.nav === 'r:annual' && S.yearToggle.sheet) || S.lastRenderedSheet;
+            const sh2 = wb2.getSheets().find((x) => { try { return nm && x.getSheetName() === nm; } catch (e2) { return false; } }) || wb2.getSheets()[0];
             let row = null;
             const ar = sh2.getActiveRange && sh2.getActiveRange();
             if (ar && typeof ar.getRow === 'function') row = ar.getRow();
@@ -787,7 +834,8 @@
     placeMount();
   }
 
-  // Univer 0.6.9 挂载后会把容器挪到 body 下：拉回工作台并触发画布重算
+  // Univer 0.6.9 挂载后会把容器挪到 body 下：拉回工作台容器并触发画布重算
+  // （客户动态不用主画布，它有两块自己的挂载：placeDashMounts）
   function placeMount() {
     const host = document.getElementById('page-sheet');
     const m = document.getElementById('univerMount');
@@ -818,6 +866,31 @@
       }
     } catch (e) { /* ignore */ }
     return map;
+  }
+
+  // 表内容未变时仅激活（毫秒级切换，避免大表整张重渲染卡顿）。token 由调用方按 数据版本+查询条件 构造。
+  async function activateIfFresh(sheetName, token) {
+    if (S.sheetToken[sheetName] !== token || S.isRendering) return false;
+    const wb = S.u.api.getActiveWorkbook();
+    if (!wb) return false;
+    const sh = wb.getSheets().find((x) => { try { return x.getSheetName() === sheetName; } catch (e) { return false; } });
+    if (!sh) return false;
+    try { sh.activate(); } catch (e) { /* ignore */ }
+    placeMount();   // 短路路径也要把画布拉回当前页面容器（如从客户动态切回工作台）
+    try {
+      const um = document.getElementById('univerMount');
+      if (um) um.dispatchEvent(new Event('resize'));
+      window.dispatchEvent(new Event('resize'));
+    } catch (e) { /* ignore */ }
+    S.lastRenderedSheet = sheetName;
+    return true;
+  }
+
+  // 收集进行中的异步保存：平时 fire-and-forget，关闭软件前 __flushMemory 等待全部落库
+  function trackSave(p) {
+    if (!p || !p.finally) return;
+    S.pendingSaves.push(p);
+    p.finally(() => { const i = S.pendingSaves.indexOf(p); if (i >= 0) S.pendingSaves.splice(i, 1); });
   }
 
   // 把某张表的当前用户调整（布局+单元格样式）与基线差分后落库。
@@ -877,18 +950,38 @@
       }
       if (wChanged || hChanged || fzChanged || stylesChanged) {
         S.sheetLayouts[layName] = { w: widths, h: heights, fz: fz || null };
-        try { api('set_pref', 'sheetLayouts', JSON.stringify(S.sheetLayouts)); } catch (e) { /* ignore */ }
+        trackSave(api('set_pref', 'sheetLayouts', JSON.stringify(S.sheetLayouts)));
         if (stylesChanged) {
-          try { api('set_pref', 'userStyles', JSON.stringify(S.userStyles)); } catch (e) { /* ignore */ }
+          trackSave(api('set_pref', 'userStyles', JSON.stringify(S.userStyles)));
         }
       }
     } catch (e) { /* ignore */ }
   }
   function layKeySafe(n) { return String(n || ''); }
 
-  function clearSheet(sh) {
+  function clearSheet(sh, opts) {
     // 注意：FFacade 数字坐标的 getRange 是 0 基；FRange 只有 clearFormat（单数），
     // clearFormats 是 FWorksheet 的方法——旧代码调错名字异常被吞，样式从未清过（残留根源）。
+    // 大表整表 clearContent+clearFormat 是分钟级慢路径（5.3 万行 ≈ 6s）。
+    // 传入 keepRows/keepCols（本次写入范围）且有上一次写入记录（S.sheetExtent）时，
+    // 只清「新范围之外的尾巴」——重叠区会被本次 setValues 全量覆盖，无需清。
+    const ext = S.sheetExtent ? S.sheetExtent[String(sh.getSheetName() || '')] : null;
+    if (opts && opts.keepRows != null && ext) {
+      const nrows = sh.getMaxRows(), ncols = sh.getMaxColumns();
+      const oldR = Math.min(ext.rows, nrows), oldC = Math.min(ext.cols, ncols);
+      const nr = opts.keepRows, nc = opts.keepCols;
+      try {
+        if (oldR > nr) {
+          sh.getRange(nr, 0, oldR - nr, oldC).clearContent();
+          sh.getRange(nr, 0, oldR - nr, oldC).clearFormat();
+        }
+        if (oldC > nc) {
+          sh.getRange(0, nc, Math.min(nr, oldR), oldC - nc).clearContent();
+          sh.getRange(0, nc, Math.min(nr, oldR), oldC - nc).clearFormat();
+        }
+      } catch (e0) { /* ignore */ }
+      return;
+    }
     try { sh.getRange(0, 0, sh.getMaxRows(), sh.getMaxColumns()).clearContent(); }
     catch (e) { try { sh.clearContents(); } catch (e2) { /* ignore */ } }
     try { sh.getRange(0, 0, sh.getMaxRows(), sh.getMaxColumns()).clearFormat(); }
@@ -923,6 +1016,7 @@
   async function invalidateStatOutputs() {
     const names = new Set(Object.values(S.statResults).map((s) => String(s.sheet || '')));
     S.statResults = {};
+    S.dataToken++;
     if (!S.u) return;
     const wb = S.u.api.getActiveWorkbook();
     if (!wb) return;
@@ -949,30 +1043,75 @@
     return m[1] + (Number(m[2]) + n) + ':' + m[3] + (Number(m[4]) + n);
   }
 
-  async function renderSpec(spec) {
-    S.isRendering = true;
-    try { await renderSpecInner(spec); } finally { S.isRendering = false; }
+  let renderChain = Promise.resolve();
+  function renderSpec(spec) {
+    // 串行队列：桥接切换/快速切换菜单时的并发渲染排队执行，避免交叉写同一张表卡死主线程
+    const p = renderChain.then(() => renderSpecInner(spec));
+    renderChain = p.catch(() => { /* ignore */ });
+    return p;
   }
 
   async function renderSpecInner(spec) {
+    const mySeq = (window.__rs = (window.__rs || 0) + 1);
+    S.isRendering = true;
+    try {
+      await renderSpecInnerBody(spec);
+      try { if (window.__renderProfile) window.__renderProfile.last.__done = true; } catch (e) { /* ignore */ }
+    } finally {
+      S.isRendering = false;
+      window.__rsDone = mySeq;
+    }
+  }
+
+  async function renderSpecInnerBody(spec) {
     placeMount();
     // 每个功能拥有自己的工作表：按 spec.sheet 找表（无则新建），原地清空重写，不影响其他功能的表
     const wb = S.u.api.getActiveWorkbook();
     if (!wb) return;
     const name = String(spec.sheet || 'Home');
+    const ncPreview = (sp) => Math.max(...((sp && sp.values) || [['']]).map((r) => r.length), 1);
     const findSheet = () => {
       try { const hit = wb.getSheetByName(name); if (hit) return hit; } catch (e) { /* 老 facade 无此方法 */ }
       return wb.getSheets().find((s) => { try { return s.getSheetName() === name; } catch (e2) { return false; } }) || null;
     };
+    const need = (spec.values || []).length + 2;
+    let freshSheet = false;
     let sh = findSheet();
-    if (!sh) {
+    // 行容量不足或严重过剩时删旧重建（快照建表毫秒级；而大表整表 clearContent+clearFormat 是
+    // 分钟级慢路径——如销售记录从"全部"(5.3万行)切回 100，复用旧表会整表清空卡死）。
+    // 建表走「裸 {id,name} 的 insert-sheet」：历史验证 numfmt 等命令健康
+    // （带自定义 snapshot 的 insert-sheet / wb.create 均会导致 "numfmt.set is not registered"，大范围卡死）。
+    if (sh && (sh.getMaxRows() < need || sh.getMaxRows() > need + 1000)) {
       try {
+        // 不能删当前激活表（命令会被静默拒绝）——先切到另一张表再删
+        const other = wb.getSheets().find((x) => { try { return x.getSheetId() !== sh.getSheetId(); } catch (e1) { return false; } });
+        if (other) { try { other.activate(); } catch (e0) { /* ignore */ } }
+        await S.u.api.executeCommand('sheet.command.remove-sheet', { unitId: wb.getId(), subUnitId: sh.getSheetId() });
+      } catch (e) { /* ignore */ }
+      sh = null;
+    }
+    if (!sh) {
+      const newId = 'sh_' + Date.now() + '_' + Math.floor(Math.random() * 10000);
+      try {
+        // 快照建表带 rowCount/columnCount：数万行表 50ms 级建好（insertRows 扩行是分钟级，已弃用）
         await S.u.api.executeCommand('sheet.command.insert-sheet', {
           unitId: wb.getId(),
-          sheet: { id: 'sh_' + Date.now() + '_' + Math.floor(Math.random() * 10000), name },
+          sheet: { id: newId, name,
+                   rowCount: Math.max(need + 50, 1000), columnCount: Math.max(ncPreview(spec) + 4, 26) },
         });
       } catch (e) { /* ignore */ }
-      sh = findSheet() || wb.getSheets()[0];
+      // 删旧建同名的场景 Univer 会自动改名（"xxx (1)"），按名字找会抓错表——按我们指定的 id 找回
+      sh = wb.getSheets().find((x) => { try { return x.getSheetId() === newId; } catch (e1) { return false; } })
+        || findSheet() || wb.getSheets()[0];
+      freshSheet = true;   // 新建空表：跳过 clearSheet（大范围 clear 是隐藏的极慢路径）
+      try { sh.activate(); } catch (e2) { /* ignore */ }
+      // 旧表若因「是激活表且无其他表可激活」删除被拒（如全新工作簿只有一张表），现在新表已激活，补删同名残表
+      const leftover = wb.getSheets().find((x) => {
+        try { return x.getSheetId() !== sh.getSheetId() && x.getSheetName() === name; } catch (e3) { return false; }
+      });
+      if (leftover) {
+        try { await S.u.api.executeCommand('sheet.command.remove-sheet', { unitId: wb.getId(), subUnitId: leftover.getSheetId() }); } catch (e4) { /* ignore */ }
+      }
     }
     try { sh.setName(name); } catch (e) { /* ignore */ }
     // 清理初始空表（Sheet1/Home）：已有其他表且它仍为空时移除。
@@ -989,9 +1128,16 @@
         }
       }
     } catch (e) { /* ignore */ }
-    // 渲染前统一快照：捕获自上次渲染完成以来的用户调整（布局+样式）并落库
-    syncSheetMemory(sh);
-    clearSheet(sh);
+    // 渲染前只同步"上次渲染的表"（用户刚编辑过的那张；含目标表自身=重新生成场景），
+    // 避免对全簿所有表做布局/样式快照导致切换卡顿。
+    try {
+      const wb0 = S.u.api.getActiveWorkbook();
+      if (S.lastRenderedSheet) {
+        const prev = wb0.getSheets().find((x) => { try { return x.getSheetName() === S.lastRenderedSheet; } catch (e) { return false; } });
+        if (prev) syncSheetMemory(prev);
+      }
+    } catch (e) { /* ignore */ }
+    // 写入范围先算（clearSheet 尾巴清理要用；勿在使用后声明——TDZ）
     let values = spec.values;
     const off = spec.info ? 2 : 0;
     if (off) {
@@ -1003,48 +1149,64 @@
     }
     const nr = values.length;
     const nc = Math.max(...values.map((r) => r.length));
-    // 0 值一律渲染为空单元格（客户口径，不依赖数字格式是否被解释）
-    const matrix = values.map((r) => {
+    if (!freshSheet) clearSheet(sh, { keepRows: nr, keepCols: nc });   // 复用表只清尾巴（整表 clear 是分钟级慢路径）
+    // 防御性小步扩容（建表已按需给行数；此分支仅覆盖建表 fallback 路径的小缺口）
+    try {
+      if (sh.getMaxRows() < need) sh.insertRows(sh.getMaxRows(), need - sh.getMaxRows());
+    } catch (e) { /* ignore */ }
+    // 数字格式随值一次写入（{v, s:{n:{pattern}}}）：绕开 numfmt 命令、万行级 250ms 内完成；
+    // 同时 0 值渲染为空单元格（客户口径）。zhFmt 已补隐藏零段。
+    const colIdxOf = (letters) => letters.split('').reduce((a, ch) => a * 26 + ch.charCodeAt(0) - 64, 0) - 1;
+    const fmtRangeCols = {};
+    (spec.numFmt || []).forEach((f) => {
+      const m = /^([A-Z]+)(\d+):([A-Z]+)(\d+)$/.exec(String(f.range || ''));
+      if (!m) return;
+      const pat = zhFmt(f.fmt);
+      if (!pat) return;
+      const c1 = colIdxOf(m[1]);
+      const r1 = Number(m[2]);
+      const c2 = colIdxOf(m[3]);
+      const r2 = Number(m[4]);
+      for (let c = c1; c <= c2; c++) fmtRangeCols[c] = { startRow0: r1 - 1, pat };
+    });
+    const matrix = values.map((r, ri) => {
       const row = r.slice();
       while (row.length < nc) row.push('');
-      for (let i = 0; i < row.length; i++) if (row[i] === 0) row[i] = '';
+      for (let ci = 0; ci < row.length; ci++) {
+        let v = row[ci];
+        if (v === 0) { row[ci] = ''; continue; }
+        const fr = fmtRangeCols[ci];
+        if (fr && ri >= fr.startRow0 && typeof v === 'number') {
+          row[ci] = { v, s: { n: { pattern: fr.pat } } };
+        }
+      }
       return row;
     });
+    const __pf = (window.__renderProfile = window.__renderProfile || { last: {} });
+    const __t = (k) => { __pf.last[k] = Math.round(performance.now() - __pf._t0); __pf._t0 = performance.now(); };
+    __pf._t0 = performance.now(); __pf.last = {};
+    __t('expandRows');
     sh.getRange(0, 0, nr, nc).setValues(matrix);
-    (spec.numFmt || []).forEach((f) => { try { sh.getRange(shiftA1(f.range, off)).setNumberFormat(zhFmt(f.fmt)); } catch (e) { /* ignore */ } });
+    __t('setValues');
+    __t('numFmt');   // 数字格式已随 setValues 写入（见矩阵构造），不再走命令
     (spec.bold || []).forEach((r) => { try { sh.getRange(shiftA1(r, off)).setFontWeight('bold'); } catch (e) { /* ignore */ } });
     (spec.bg || []).forEach((b) => { try { sh.getRange(shiftA1(b.range, off)).setBackground(b.color); } catch (e) { /* ignore */ } });
-    (spec.align || []).forEach((a) => { try { sh.getRange(shiftA1(a.range, off)).setHorizontalAlignment(a.horiz); } catch (e) { /* ignore */ } });
-    (spec.merges || []).forEach((m) => { try { sh.getRange(m).merge(); } catch (e) { /* ignore */ } });
-    // 行分组折叠（如年度统计的月份行默认折叠，点击年份行展开/收起）
-    if (spec.rowGroups && spec.rowGroups.length) {
-      const groups = spec.rowGroups.map((g) => ({
-        start: g.start + off, end: g.end + off, collapsed: true,
-      }));
-      S.activeRowGroups = { sheet: name, groups };
-      groups.forEach((g) => {
-        try { sh.hideRows(g.start, g.end - g.start + 1); } catch (e) { /* ignore */ }
-      });
-      // 年份行首列加 ▸ 折叠标识（不污染导出数据，仅显示）
-      groups.forEach((g) => {
-        const yrRow = g.start - 1;
-        if (yrRow >= 0) {
-          try {
-            const cell = sh.getRange(yrRow, 0, 1, 1);
-            const v = cell.getValue();
-            if (v && !String(v).startsWith('▸') && !String(v).startsWith('▾')) {
-              cell.setValue('▸ ' + v);
-            }
-          } catch (e) { /* ignore */ }
+    (spec.align || []).forEach((a) => {
+      try {
+        if (a.horiz === 'left') {
+          const m2 = /^(?:[A-Z]+)(\d+):(?:[A-Z]+)(\d+)$/.exec(String(a.range));
+          if (m2 && (Number(m2[2]) - 1) > 3000) return;   // 3千行以上的 left 对齐=文本默认对齐，跳过大范围样式写入（约省1.5s）
         }
-      });
-    } else {
-      S.activeRowGroups = null;
-    }
+        sh.getRange(shiftA1(a.range, off)).setHorizontalAlignment(a.horiz);
+      } catch (e) { /* ignore */ }
+    });
+    (spec.merges || []).forEach((m) => { try { sh.getRange(m).merge(); } catch (e) { /* ignore */ } });
     // 自适应列宽：按内容计算（CJK 记 2 个单位宽，数字格式预留 25% 余量），钳制在 56~420px
     const unitW = (v) => { let w = 0; for (const ch of String(v === null || v === undefined ? '' : v)) w += ch.charCodeAt(0) > 255 ? 2 : 1; return w; };
     const colUnits = new Array(nc).fill(0);
-    for (const row of spec.values) for (let c = 0; c < row.length; c++) {
+    // 大表采样：只统计前 500 行内容宽（5 万行逐格计算会显著拖慢渲染）
+    const widthSample = spec.values.slice(0, 500);
+    for (const row of widthSample) for (let c = 0; c < row.length; c++) {
       const u = unitW(row[c]);
       if (u > colUnits[c]) colUnits[c] = u;
     }
@@ -1067,10 +1229,12 @@
         }
       }
     }
+    __t('stylesBoldBgAlign');   // 粗体/背景/对齐/合并/列宽合计
     // 自适应行高：批量设置（标题行 30、口径行 24、数据行 26）
     try { sh.setRowHeights(0, 1, 30); } catch (e) { /* ignore */ }
     if (off) { try { sh.setRowHeights(1, 1, 24); } catch (e) { /* ignore */ } }
     try { sh.setRowHeights(off, Math.max(0, nr - off), 26); } catch (e) { /* ignore */ }
+    __t('rowHeights');
     if (off) { try { sh.getRange(0, 0, 1, nc).setFontWeight('bold'); } catch (e) { /* ignore */ } }
     // 应用记忆行高（用户调整过的行）
     const appliedH = {};
@@ -1106,13 +1270,19 @@
       try { sh.getRange(ri, ci, 1, 1).setValues([[{ s: styleObj }]]); } catch (e) { /* ignore */ }
     });
     S.appliedStyles[layKey] = captureCellStyles(sh);
+    __t('replayUserFmt');   // 用户样式回放+基线+冻结合计
     // 激活目标表并强制视图重绑：页签栏已隐藏，切换渲染面只能靠程序保证（activate + resize）
+    S.lastRenderedSheet = name;
     try { sh.activate(); } catch (e) { /* ignore */ }
+    __t('activate');
+    S.sheetExtent = S.sheetExtent || {};
+    S.sheetExtent[String(spec.sheet || 'Home')] = { rows: nr, cols: nc };   // 供下次渲染做尾巴清理
     try {
       const um = document.getElementById('univerMount');
       if (um) um.dispatchEvent(new Event('resize'));
       window.dispatchEvent(new Event('resize'));
     } catch (e) { /* ignore */ }
+    __t('resizeDispatch');
   }
 
   // ================= statistics（列表式结果，不再依赖 Univer 工作表） =================
@@ -1141,18 +1311,20 @@
       ] },
       { id: 'customerType', labelKey: 'statCustType', fields: ['range'] },
       { id: 'salesAccount', labelKey: 'statSalesAccount', fields: ['range'] },
-      { id: 'customerActivity', labelKey: 'statCustActivity', fields: ['range'], actions: [
-        { labelKey: 'actDetail', opts: { mode: 'detail' } },
-        { labelKey: 'actSales1', opts: { mode: 'sales1' } },
-        { labelKey: 'actCity', opts: { mode: 'city' } },
-        { labelKey: 'actCustType', opts: { mode: 'customertype' } },
-        { labelKey: 'actSleeping', opts: { mode: 'sleeping' } },
-        { labelKey: 'actNever', opts: { mode: 'never' } },
-        { labelKey: 'actNew', opts: { mode: 'new' } },
-      ] },
+      // 客户活跃统计：一个维度一张独立 Excel 表（完全隔离，便于给客户配不同样式）；
+      // 不受起始时间限制（始终统计全部客户），只提供 客户/销售/城市 模糊查询
+      { id: 'actDetail', labelKey: 'actDetail', fields: ['actf'] },
+      { id: 'actBySales1', labelKey: 'actSales1', fields: ['actf'] },
+      { id: 'actByCity', labelKey: 'actCity', fields: ['actf'] },
+      { id: 'actByType', labelKey: 'actCustType', fields: ['actf'] },
+      { id: 'actSleeping', labelKey: 'actSleeping', fields: ['actf'] },
+      // 沉睡客户唤醒统计（actReact）已恢复显示
+      { id: 'actReact', labelKey: 'actReact', fields: [] },
+      { id: 'actNever', labelKey: 'actNever', fields: ['actf'] },
+      { id: 'actNew', labelKey: 'actNew', fields: ['actf'] },
     ] },
     { id: 'g-stats', labelKey: 'navStats', icon: '📊', reports: [
-      { id: 'annual', labelKey: 'statAnnual', fields: ['range'] },
+      { id: 'annual', labelKey: 'statAnnual', fields: [] },   // 年度统计固定全量（无时间段）
       { id: 'cabinetColors', labelKey: 'statColors', fields: ['range'], actions: [
         { labelKey: 'genNoUni', opts: { includeUniversal: false } },
         { labelKey: 'genWithUni', opts: { includeUniversal: true } },
@@ -1182,22 +1354,24 @@
       fields.push({ key: 'custNo', label: t('custNo'), type: 'combo', fuzzy: 'customers', value: '' });
       fields.push({ key: 'itemNo', label: t('colItemNo'), type: 'combo', fuzzy: 'items', value: '' });
       fields.push({ key: 'invoice', label: t('colInvoice'), type: 'combo', fuzzy: 'invoices', value: '' });
+      fields.push({ key: 'sales', label: t('colRep1'), type: 'combo', fuzzy: 'rep1', value: '' });
     }
-    const ensureCtx = async () => {
-      const c = getCtx('', '');
-      if (c) return c;
-      const fresh = await api('get_stats_context', '', '');
-      putCtx('', '', fresh);
-      return fresh;
+    if (def.fields.includes('actf')) {
+      // 客户活跃统计系列：客户/销售/城市模糊查询（可留空=全部）；无时间段（始终统计全部客户）
+      fields.push({ key: 'fCust', label: t('custNo'), type: 'combo', fuzzy: 'customers', value: '' });
+      fields.push({ key: 'fSales', label: t('colRep1'), type: 'combo', fuzzy: 'rep1', value: '' });
+      fields.push({ key: 'fCity', label: t('dlgCity'), type: 'combo', fuzzy: 'cities', value: '' });
+    }
+    // 下拉类别/型号用轻量聚合接口（SQL DISTINCT），不再为下拉拉全表明细
+    const ensureTypes = async () => {
+      try { return (await api('get_lookup_data')).types || []; } catch (e) { return []; }
     };
     if (def.fields.includes('category')) {
-      const ctx = await ensureCtx();
-      const opts = ['ALL', ...distinctTypes(ctx.sales)];
+      const opts = ['ALL', ...(await ensureTypes())];
       fields.push({ key: 'category', label: t('dlgCategory'), type: 'combo', options: opts, value: 'ALL' });
     }
     if (def.fields.includes('type')) {
-      const ctx = await ensureCtx();
-      const opts = distinctTypes(ctx.sales).filter((v) => !STATS.helpers.isCabinetType(v));
+      const opts = (await ensureTypes()).filter((v) => !STATS.helpers.isCabinetType(v));
       if (!opts.includes('SLAB')) opts.unshift('SLAB');
       fields.push({ key: 'type', label: t('dlgType'), type: 'combo', options: opts, value: 'SLAB' });
     }
@@ -1220,11 +1394,14 @@
   }
 
   async function runStatInner(def, opts, btn) {
+    // 计时埋点：取数/计算/渲染 三段耗时写进状态栏（排查“统计要一分钟以上”用）
+    const pf0 = performance.now();
     const ctx = getCtx(opts.start, opts.end) || await (async () => {
-      const c = await api('get_stats_context', opts.start || '', opts.end || '');
+      const c = await normalizeCtx(await api('get_stats_context', opts.start || '', opts.end || ''));
       putCtx(opts.start || '', opts.end || '', c);
       return c;
     })();
+    const pf1 = performance.now();
     if (!ctx || !ctx.sales || !ctx.sales.length) {
       // 区分「库里完全没有销售」和「所选时间段内没有销售」
       if (opts.start || opts.end) {
@@ -1237,19 +1414,51 @@
       return;
     }
     const spec = STATS[def.id](ctx.sales, Object.assign({}, opts, { reps: ctx.reps, stock: ctx.stock, customers: ctx.customers }), t);
+    const pf2 = performance.now();
     if (!spec || spec.error) {
       const key = 'err' + String((spec && spec.error) || '');
       toast(t(key) !== key ? t(key) : tf('statEmpty', { msg: (spec && spec.error) || '' }));
       return;
     }
+    // 渲染行数封顶：Univer 对万行级表格无稳定路径（扩行悬死），超限截断并提示缩小条件。
+    // 数据缓存仍保存完整 spec（导出/切回重铺同受此限，保证不再卡死）。
+    const RENDER_CAP = 60000;   // 快照建表+格式随值写入后，万行级渲染已稳定（5 万行 ~1s）
+    const totalRows = (spec.values || []).length - 1;
+    if (totalRows > RENDER_CAP) {
+      const v = spec.values;
+      const keep = [v[0], ...v.slice(1, RENDER_CAP + 1)];
+      // 超限截断时保留 Total/合计行（其数值按全量计算，仍然正确），不能把合计裁掉
+      const lastRow = v[v.length - 1];
+      if (v.length - 1 > RENDER_CAP && /^(total|grand total|.*总计|.*合计)/i.test(String(lastRow && lastRow[0] || ''))) {
+        keep.push(lastRow);
+      }
+      spec.values = keep;
+      spec.truncated = { shown: RENDER_CAP, total: totalRows };
+      try { toast(tf('statTruncated', { n: RENDER_CAP, t: totalRows })); } catch (e) { /* ignore */ }
+    }
+    if (spec.yearGroups) { try { toast(t('annualCollapseHint')); } catch (e) { /* ignore */ } }
     initUniver();
-    await renderSpec(spec);
+    try {
+      await renderSpec(spec);
+    } catch (e) {
+      toast('Render error: ' + (e && e.message ? e.message : e));
+      return;
+    }
+    const pf3 = performance.now();
+    spec.perf = { ctx: (pf1 - pf0) / 1000, calc: (pf2 - pf1) / 1000, render: (pf3 - pf2) / 1000 };
+    try { console.info('[perf]', def.id, 'ctx=' + spec.perf.ctx.toFixed(2) + 's calc=' + spec.perf.calc.toFixed(2) + 's render=' + spec.perf.render.toFixed(2) + 's'); } catch (e) { /* ignore */ }
     spec.doneAt = now2();
+    S.yearToggle = spec.yearGroups ? { sheet: spec.sheet, groups: spec.yearGroups } : null;
     S.statResults[def.id] = spec;
     S.statSheetName[def.id] = spec.sheet;
+    S.sheetToken[spec.sheet] = 'stat:' + S.dataToken;   // 数据未变时切回该报表=纯激活
     renderStatExtra(def);
     const st = document.getElementById('stat-state');
-    if (st) st.textContent = tf('statStateDone', { t: spec.doneAt });
+    if (st) {
+      let txt = tf('statStateDone', { t: spec.doneAt });
+      if (spec.perf) txt += '（' + tf('statTiming', { a: spec.perf.ctx.toFixed(1), b: spec.perf.calc.toFixed(1), c: spec.perf.render.toFixed(1) }) + '）';
+      st.textContent = txt;
+    }
     if (btn) {
       document.querySelectorAll('#stat-actions button').forEach((b) => b.classList.remove('triggered'));
       btn.classList.add('triggered');
@@ -1272,8 +1481,9 @@
     const spec = S.statResults[def.id];
     if (!spec || !spec.values || !spec.values.length) { toast(t('exportEmpty')); return; }
     try {
-      WebImport.exportXlsx(spec.sheet, spec.values);
-      toast(t('exportDone') || 'Exported');
+      const res = await api('export_sheet_xlsx', JSON.stringify({ name: spec.sheet, values: spec.values }));
+      if (res && res.ok) toast(tf('exportDone', { p: res.path }));
+      else toast(tf('exportFail', { e: (res && res.error) || '' }));
     } catch (e) {
       toast(tf('exportFail', { e: e.message || e }));
     }
@@ -1357,6 +1567,10 @@
           attachFuzzy(input, { fetch: fuzzyItems });
         } else if (f.fuzzy === 'invoices') {
           attachFuzzy(input, { fetch: (text) => getLookup().then((lk) => fuzzySimple(lk.invoices, text)) });
+        } else if (f.fuzzy === 'rep1') {
+          attachFuzzy(input, { fetch: fuzzyRep1 });
+        } else if (f.fuzzy === 'cities') {
+          attachFuzzy(input, { fetch: (text) => getLookup().then((lk) => fuzzySimple(lk.cities || [], text)) });
         }
       }
     });
@@ -1391,10 +1605,20 @@
     // 切换报表必须切到它自己的表格：
     //  - 有最近一次结果 → 重铺（重绘矩阵，不重算）
     //  - 没有结果（从未生成/数据变更后被清）→ 铺该报表自己的空表，绝不停留在别的功能的表上
-    if (cached) { try { await renderSpec(cached); } catch (e) { /* ignore */ } }
-    else {
+    if (cached) {
+      // 数据未变（token 命中）→ 纯激活，避免整张重铺卡顿；否则重铺缓存矩阵
+      if (!await activateIfFresh(cached.sheet, 'stat:' + S.dataToken)) {
+        try { await renderSpec(cached); } catch (e) { /* ignore */ }
+        S.sheetToken[cached.sheet] = 'stat:' + S.dataToken;
+      }
+    } else {
       const nm = S.statSheetName[def.id] || STATS.sheetNames[def.id] || '';
-      if (nm) { try { await renderSpec({ sheet: nm, values: [['']] }); } catch (e) { /* ignore */ } }
+      if (nm) {
+        if (!await activateIfFresh(nm, 'stat:' + S.dataToken)) {
+          try { await renderSpec({ sheet: nm, values: [['']] }); } catch (e) { /* ignore */ }
+          S.sheetToken[nm] = 'stat:' + S.dataToken;
+        }
+      }
     }
   }
 
@@ -1474,6 +1698,11 @@
     fsBtn.className = 'btn ghost';
     fsBtn.textContent = '⛶ ' + t('fullscreen');
     fsBtn.onclick = toggleFullscreen;
+    const saveBtn = document.createElement('button');
+    saveBtn.className = 'btn ghost';
+    saveBtn.textContent = '💾 ' + t('miSave') + ' (Ctrl+S)';   // 快捷键直接标在按钮上，使用者不用查
+    saveBtn.title = t('manualSavedTip');
+    saveBtn.onclick = manualSave;
     const syncBtn = document.createElement('button');
     syncBtn.className = 'btn ghost';
     syncBtn.textContent = '🔄 ' + t('syncSheets');
@@ -1502,10 +1731,40 @@
     mb.appendChild(brand);
     mb.appendChild(file);
     mb.appendChild(spacer);
+    mb.appendChild(saveBtn);
     mb.appendChild(langBtn);
     mb.appendChild(syncBtn);
     mb.appendChild(fsBtn);
   }
+
+  // 手动保存：与切换/退出时同一套落库链（分组直接编辑 + 客户动态两块面板 + 主画布最近表 + 待写队列）。
+  // 平时不动它也行——切换/关闭仍会自动保存；这个按钮用于“改完样式当场保存”。
+  async function manualSave() {
+    try {
+      if (S.nav === 'reps' && S.repGrid) {
+        const n = syncRepsFromGrid();
+        if (n) toast(tf('repsAutoSaved', { n }));
+      }
+      syncDashMemory();
+      if (S.u && S.u.api && S.lastRenderedSheet && !S.isRendering) {
+        const wb = S.u.api.getActiveWorkbook();
+        const prev = wb.getSheets().find((x) => { try { return x.getSheetName() === S.lastRenderedSheet; } catch (e) { return false; } });
+        if (prev) syncSheetMemory(prev);
+      }
+      await Promise.allSettled(S.pendingSaves.slice());
+      toast(t('manualSaved'));
+    } catch (e) {
+      toast(t('manualSavedFail'));
+    }
+  }
+
+  // Ctrl+S 手动保存（拦截浏览器默认）
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && String(e.key).toLowerCase() === 's') {
+      e.preventDefault();
+      manualSave();
+    }
+  });
 
   function closeDropdowns() {
     document.querySelectorAll('.menu-item.open').forEach((m) => m.classList.remove('open'));
@@ -1513,6 +1772,7 @@
   document.addEventListener('click', closeDropdowns);
 
   function toggleFullscreen() {
+    if (window.pywebview && window.pywebview.api) { window.pywebview.api.toggle_fullscreen(); return; }
     if (document.fullscreenElement) document.exitFullscreen();
     else document.documentElement.requestFullscreen();
   }
@@ -1527,6 +1787,8 @@
     dashboard: '📈', annual: '📅', salesPerformance: '🏆', customerOrders: '🧾',
     categoryQuery: '🔎', customerStats: '👤', cabinetColors: '🎨', stoneSales: '🪨',
     salesHistory: '🕘', customerType: '🏷', salesAccount: '🆕', customerActivity: '💓',
+    actDetail: '💓', actBySales1: '🧑‍💼', actByCity: '🏙', actByType: '🏷',
+    actSleeping: '😴', actNever: '🚫', actNew: '🌟', actReact: '🔔',
   };
   // children 里还可以再嵌套 children，即可支持三级及以上菜单
   // 报表类功能全部收进左侧多级菜单（r:报表ID 直达该报表），不再使用顶部横向选项卡
@@ -1543,9 +1805,6 @@
     })) },
     { id: 'dashboard', labelKey: 'tabDashboard' },
   ];
-  function persistNavCollapsed() {
-    try { api('set_pref', 'navCollapsed', JSON.stringify([...S.navCollapsed])); } catch (e) { /* ignore */ }
-  }
   function buildSidebar() {
     const sb = $('#sidebar');
     sb.classList.toggle('collapsed', S.sidebarCollapsed);
@@ -1562,23 +1821,19 @@
     sb.appendChild(toggle);
     renderNavNodes(NAV, sb, 0);
   }
+  // 一级菜单：所有功能项平铺直达（与客户动态同级），分组只作静态小标题不可折叠；
+  // 纯分组的中间层（如「报表」下全是板块）不再显示标题，避免两层标题堆叠。
   function renderNavNodes(nodes, sb, depth) {
     nodes.forEach((n) => {
       if (n.children) {
-        const collapsed = S.navCollapsed.has(n.id);
-        const head = document.createElement('div');
-        head.className = 'nav-head';
-        head.style.paddingLeft = (12 + depth * 12) + 'px';
-        head.innerHTML = '<span class="chev">' + (collapsed ? '▸' : '▾') + '</span>' +
-          (n.icon ? '<span>' + n.icon + '</span>' : '') +
-          '<span>' + t(n.labelKey) + '</span>';
-        head.onclick = () => {
-          if (S.navCollapsed.has(n.id)) S.navCollapsed.delete(n.id); else S.navCollapsed.add(n.id);
-          persistNavCollapsed();
-          buildSidebar();
-        };
-        sb.appendChild(head);
-        if (!collapsed) renderNavNodes(n.children, sb, depth + 1);
+        const allGroups = n.children.every((c) => c.children);
+        if (!allGroups) {
+          const cap = document.createElement('div');
+          cap.className = 'nav-cap';
+          cap.textContent = (n.icon ? n.icon + ' ' : '') + t(n.labelKey);
+          sb.appendChild(cap);
+        }
+        renderNavNodes(n.children, sb, depth + 1);
       } else {
         const a = document.createElement('div');
         a.className = 'nav-item' + (S.nav === n.id ? ' active' : '');
@@ -1587,7 +1842,6 @@
           a.title = t(n.labelKey);
         } else {
           a.textContent = (n.icon ? n.icon + ' ' : '') + t(n.labelKey);
-          a.style.paddingLeft = (14 + depth * 12) + 'px';
           a.title = '';
         }
         a.onclick = () => navigate(n.id);
@@ -1596,10 +1850,21 @@
     });
   }
   function navigate(id) {
-    // 离开基础数据页时：直接编辑的修改立即落库（不等 2.5s 定时），有变更则提示
-    if (S.nav === 'reps' && id !== 'reps') {
-      const n = syncRepsFromGrid();
-      if (n) toast(tf('repsAutoSaved', { n }));
+    // 离开当前页面时立即落库（不等定时器）：分组直接编辑 + 上一张渲染表的布局/样式调整。
+    // 覆盖切到 history/dashboard 等不触发渲染的页面；关闭软件无可靠钩子，仍由 2.5s 定时器兜底最后几秒。
+    if (id !== S.nav) {
+      if (S.nav === 'reps') {
+        const n = syncRepsFromGrid();
+        if (n) toast(tf('repsAutoSaved', { n }));
+      }
+      if (S.nav === 'dashboard') syncDashMemory();   // 离开客户动态：保存两块面板的布局/样式调整
+      try {
+        if (S.u && S.u.api && S.lastRenderedSheet) {
+          const wb0 = S.u.api.getActiveWorkbook();
+          const prev = wb0.getSheets().find((x) => { try { return x.getSheetName() === S.lastRenderedSheet; } catch (e) { return false; } });
+          if (prev) syncSheetMemory(prev);
+        }
+      } catch (e) { /* ignore */ }
     }
     // 统一直达报表：r:报表ID；兼容旧 stat:报表ID / hub:板块ID（折算成板块第一个报表）
     if (id.startsWith('stat:')) id = 'r:' + id.slice(5);
@@ -1621,7 +1886,7 @@
     const um = document.getElementById('univerMount');
     if (um) um.style.display = 'block';   // 导入记录页会隐藏工作表，离开时务必恢复
     if (isDash) {
-      renderDashboard();
+      renderDashboard();   // 客户动态用两块独立 Excel 面板（懒加载引擎），不用主画布
       buildSidebar();
       return;
     }
@@ -1668,89 +1933,270 @@
   // 右下=最近12个完整月份销售趋势折线图（横）。对应原 Apps Script「客户动态分析」表布局。
   const PERIOD_KEYS = [['ALL', 'periodAll'], ['LAST_MONTH', 'periodLastMonth'], ['THIS_YEAR', 'periodThisYear'], ['YTD', 'periodYtd']];
   async function renderDashboard() {
-    const ctx = getCtx('', '') || await (async () => {
-      const c = await api('get_stats_context', '', '');
-      putCtx('', '', c);
-      return c;
-    })();
-    const dd = STATS.customerDashboardData(ctx.sales, { period: S.dash.period }, ctx.reps);
-    S.dash.cache = dd;
-    // 时间段按钮（在左栏标题行，对应原表 D1「时间范围」下拉）
-    const seg = $('#dash-periods');
-    seg.innerHTML = '';
-    PERIOD_KEYS.forEach(([k, lk]) => {
-      const b = document.createElement('button');
-      b.className = 'btn sm seg-btn' + (S.dash.period === k ? ' primary' : '');
-      b.textContent = t(lk);
-      b.onclick = () => { S.dash.period = k; renderDashboard(); };
-      seg.appendChild(b);
-    });
-    $('#dash-list-title').textContent = t('dashList') + '（' + t(PERIOD_KEYS.find(([k]) => k === S.dash.period)[1]) + '）';
-    if (!dd.customers || !Object.keys(dd.customers).length) {
-      $('#dash-list').innerHTML = '<div class="empty">' + esc(t('noDataShort')) + '</div>';
-      $('#dash-trend').innerHTML = '';
-      $('#dash-cust-title').textContent = '';
-      if (S.dash.chart) S.dash.chart.clear();
-      return;
-    }
-    // 选中客户：记住选择；不存在则取当前榜第一
-    const ranking = dd.rankings[S.dash.period] || [];
-    if (!ranking.some((r) => r[0] === S.dash.customerNo)) {
-      S.dash.customerNo = ranking.length ? ranking[0][0] : '';
-    }
-    renderDashRanking(ranking);
-    renderDashAnalysis();
-    renderDashChart();
-  }
-
-  function renderDashRanking(ranking) {
-    const wrap = $('#dash-list');
-    let html = '<table class="grid"><thead><tr><th>' + esc(t('custNo')) + '</th><th>' + esc(t('custName')) + '</th><th>' + esc(t('dashTotalAmt')) + '</th><th>' + esc(t('colRep1')) + '</th><th>' + esc(t('colRep2')) + '</th></tr></thead><tbody>';
-    if (!ranking.length) html += '<tr><td colspan="5" class="empty">' + esc(t('noDataShort')) + '</td></tr>';
-    ranking.forEach((r) => {
-      const sel = r[0] === S.dash.customerNo ? ' class="sel"' : '';
-      html += '<tr' + sel + ' data-dc="' + esc(r[0]) + '"><td>' + esc(r[0]) + '</td><td>' + esc(r[1]) + '</td><td class="num">' + fmtMoneyZ(r[2]) + '</td><td>' + esc(r[3]) + '</td><td>' + esc(r[4]) + '</td></tr>';
-    });
-    html += '</tbody></table>';
-    wrap.innerHTML = html;
-    const pick = (no) => {
-      if (S.dash.customerNo === no) return;
-      S.dash.customerNo = no;
-      renderDashRanking(ranking);
-      renderDashAnalysis();
+    loadBar(true);
+    try {
+      const ctx = getCtx('', '') || await (async () => {
+        const c = await normalizeCtx(await api('get_stats_context', '', ''));
+        putCtx('', '', c);
+        return c;
+      })();
+      const dd = STATS.customerDashboardData(ctx.sales, { period: S.dash.period }, ctx.reps);
+      S.dash.cache = dd;
+      // 时间段按钮（对应原表 D1「时间范围」下拉）
+      const seg = $('#dash-periods');
+      seg.innerHTML = '';
+      PERIOD_KEYS.forEach(([k, lk]) => {
+        const b = document.createElement('button');
+        b.className = 'btn sm seg-btn' + (S.dash.period === k ? ' primary' : '');
+        b.textContent = t(lk);
+        b.onclick = () => { S.dash.period = k; renderDashboard(); };
+        seg.appendChild(b);
+      });
+      $('#dash-list-title').textContent = t('dashList') + '（' + t(PERIOD_KEYS.find(([k]) => k === S.dash.period)[1]) + '）';
+      await initDashEngines();
+      if (!dd.customers || !Object.keys(dd.customers).length) {
+        $('#dash-cust-title').textContent = '';
+        if (S.dash.chart) S.dash.chart.clear();
+        await renderDashList();
+        await renderDashAna();
+        return;
+      }
+      // 选中客户：记住选择；不存在则取当前榜第一
+      const ranking = dd.rankings[S.dash.period] || [];
+      if (!ranking.some((r) => r[0] === S.dash.customerNo)) {
+        S.dash.customerNo = ranking.length ? ranking[0][0] : '';
+      }
+      await renderDashList();
+      await renderDashAna();
       renderDashChart();
-    };
-    wrap.querySelectorAll('tr[data-dc]').forEach((tr) => (tr.onclick = () => pick(tr.dataset.dc)));
+    } finally {
+      loadBar(false);
+    }
   }
 
-  // 右上：年份表（全部历史）+ 最近12个月表，底部合计——对应原表 G:J / M:P 区块
-  function renderDashAnalysis() {
-    const dd = S.dash.cache;
-    const cust = dd.customers[S.dash.customerNo];
-    const wrap = $('#dash-trend');
+  // 客户动态两块面板各挂一个独立 Univer 实例（一个画布只能显示一张表，左右面板=两台引擎）。
+  // 引擎懒加载：首次进入客户动态才创建；主画布（page-sheet）与此互不影响。
+  async function initDashEngines() {
+    if (S.dashEngines) { placeDashMounts(); return; }
+    S.dashEngines = {
+      list: makeUniverApp('dashListMount'),
+      ana: makeUniverApp('dashAnaMount'),
+    };
+    placeDashMounts();
+    // 左侧列表：点击行选中客户。挂在 mousedown 上（实测 mousedown 后选区立即正确，
+    // mouseup 后 getActiveRange 反而读到旧值/默认值——挂 mouseup 会固定选中上一行）；
+    // 轮询几次拿到新选区（Univer 应用选区可能晚于监听回调），拿到即选。
+    try {
+      document.body.addEventListener('mousedown', (e) => {
+        if (!S.dashEngines || !e.target || !e.target.closest || !e.target.closest('#dashListMount')) return;
+        const readRow = () => {
+          try {
+            const wb = S.dashEngines.list.api.getActiveWorkbook();
+            const sh = wb.getSheets().find((x) => { try { return x.getSheetName() === '客户列表'; } catch (e2) { return false; } });
+            const ar = sh && sh.getActiveRange ? sh.getActiveRange() : null;
+            return ar && typeof ar.getRow === 'function' ? ar.getRow() : null;
+          } catch (e3) { return null; }
+        };
+        let tries = 0;
+        const tick = () => {
+          const row = readRow();
+          const no = row != null ? (S.dash.rowMap || {})[row] : null;
+          tries++;
+          if ((no && no !== S.dash.customerNo) || tries >= 6) {
+            if (no && no !== S.dash.customerNo) {
+              S.dash.customerNo = no;
+              renderDashList().catch(() => { /* ignore */ });
+              renderDashAna();
+              renderDashChart();
+            }
+            return;
+          }
+          setTimeout(tick, 80);
+        };
+        setTimeout(tick, 0);
+      }, true);
+    } catch (e) { /* ignore */ }
+  }
+
+  // Univer UI 会把挂载元素挪到 body 下：拉回面板容器并触发画布重算
+  function placeDashMounts() {
+    [['dashListMount', 'dash-list-box'], ['dashAnaMount', 'dash-ana-box']].forEach(([mid, hid]) => {
+      const m = document.getElementById(mid);
+      const h = document.getElementById(hid);
+      if (m && h && m.parentElement !== h) h.appendChild(m);
+    });
+    try {
+      window.dispatchEvent(new Event('resize'));
+      ['dashListMount', 'dashAnaMount'].forEach((mid) => {
+        const el = document.getElementById(mid);
+        if (el) el.dispatchEvent(new Event('resize'));
+      });
+    } catch (e) { /* ignore */ }
+  }
+
+  // 离开客户动态/关闭软件时保存两块面板的布局与样式调整（与主画布同一套记忆键：按表名）
+  function syncDashMemory() {
+    if (!S.dashEngines || S.isRendering) return;
+    [['list', '客户列表'], ['ana', '客户动态分析']].forEach(([k, nm]) => {
+      try {
+        const wb = S.dashEngines[k].api.getActiveWorkbook();
+        const sh = wb.getSheets().find((x) => { try { return x.getSheetName() === nm; } catch (e) { return false; } });
+        if (sh) syncSheetMemory(sh);
+      } catch (e) { /* ignore */ }
+    });
+  }
+
+  // 小表直渲染：临时表重建（容量充足、无残留），格式随值写入；应用并记录布局/样式记忆（表名=记忆键）
+  async function renderDashSheet(engKey, spec) {
+    const eng = S.dashEngines && S.dashEngines[engKey];
+    if (!eng) return;
+    const wb = eng.api.getActiveWorkbook();
+    if (!wb) return;
+    const name = String(spec.sheet);
+    const nc = Math.max(...spec.values.map((r) => r.length), 1);
+    const old = wb.getSheets().find((x) => { try { return x.getSheetName() === name; } catch (e) { return false; } }) || null;
+    // 先建 ~tmp 表、激活、删旧表、再改回正名：避开「删激活表被静默拒绝」「同名自动改名(1)」两个坑
+    const tmpId = 'dsh_' + Date.now() + '_' + Math.floor(Math.random() * 10000);
+    await eng.api.executeCommand('sheet.command.insert-sheet', {
+      unitId: wb.getId(),
+      sheet: { id: tmpId, name: name + '~tmp', rowCount: Math.max(spec.values.length + 20, 60), columnCount: Math.max(nc + 4, 10) },
+    });
+    let sh = wb.getSheets().find((x) => x.getSheetId() === tmpId);
+    if (!sh) return;
+    try { sh.activate(); } catch (e) { /* ignore */ }
+    if (old) {
+      try { await eng.api.executeCommand('sheet.command.remove-sheet', { unitId: wb.getId(), subUnitId: old.getSheetId() }); } catch (e) { /* ignore */ }
+    }
+    try { sh.setName(name); } catch (e) { /* ignore */ }
+    // 清理 createUnit 自带的默认空表（保持引擎里只有业务表）
+    const blank = wb.getSheets().find((x) => {
+      let n2 = '';
+      try { n2 = x.getSheetName(); } catch (e) { /* ignore */ }
+      return (n2 === 'Sheet1' || n2 === '工作表1') && x.getSheetId() !== sh.getSheetId();
+    });
+    if (blank) {
+      try { await eng.api.executeCommand('sheet.command.remove-sheet', { unitId: wb.getId(), subUnitId: blank.getSheetId() }); } catch (e) { /* ignore */ }
+    }
+    // 矩阵构造：0→空串（全套系统口径），numFmt 列金额格式随值写入
+    const colIdx = (s) => { let n2 = 0; for (const ch of s) n2 = n2 * 26 + (ch.charCodeAt(0) - 64); return n2 - 1; };
+    const fr = {};
+    (spec.numFmt || []).forEach((f) => {
+      const m = /^([A-Z]+)(\d+):([A-Z]+)(\d+)$/.exec(f.range);
+      if (!m) return;
+      const c1 = colIdx(m[1]), c2 = colIdx(m[3]);
+      for (let c = c1; c <= c2; c++) fr[c] = { startRow0: Number(m[2]) - 1, pat: f.fmt };
+    });
+    const matrix = spec.values.map((row, ri) => row.map((v, ci) => {
+      if (v === 0) return '';
+      const f = fr[ci];
+      if (f && ri >= f.startRow0 && typeof v === 'number') return { v, s: { n: { pattern: zhFmt(f.pat) } } };
+      return v;
+    }));
+    try { sh.getRange(0, 0, matrix.length, nc).setValues(matrix); } catch (e) { /* ignore */ }
+    try { sh.getRange(0, 0, 1, nc).setFontWeight('bold'); } catch (e) { /* ignore */ }
+    (spec.bg || []).forEach((b) => { try { sh.getRange(b.range).setBackground(b.color); } catch (e) { /* ignore */ } });
+    (spec.bold || []).forEach((rg) => { try { sh.getRange(rg).setFontWeight('bold'); } catch (e) { /* ignore */ } });
+    // 自适应列宽（全量内容，小表不用采样），用户记忆值优先
+    const unitW = (v) => { let w = 0; for (const ch of String(v === null || v === undefined ? '' : v)) w += ch.charCodeAt(0) > 255 ? 2 : 1; return w; };
+    const layKey = name;
+    const savedRaw = S.sheetLayouts[layKey];
+    const savedLay = Array.isArray(savedRaw) ? { w: savedRaw, h: {} } : (savedRaw || null);
+    const finalWidths = [];
+    for (let c = 0; c < nc; c++) {
+      let u = 0;
+      for (const row of spec.values) { const w = unitW(row[c]); if (w > u) u = w; }
+      let wd = Math.max(56, Math.min(420, Math.round(u * 8.4 * 1.25) + 26));
+      if (savedLay && savedLay.w && typeof savedLay.w[c] === 'number' && savedLay.w[c] >= 40) wd = savedLay.w[c];
+      try { sh.setColumnWidth(c, wd); } catch (e) { /* ignore */ }
+      finalWidths.push(wd);
+    }
+    // 行高：表头 30、数据 26，用户记忆值覆盖
+    try { sh.setRowHeights(0, 1, 30); } catch (e) { /* ignore */ }
+    if (matrix.length > 1) { try { sh.setRowHeights(1, matrix.length - 1, 26); } catch (e) { /* ignore */ } }
+    const appliedH = {};
+    if (savedLay && savedLay.h) {
+      Object.entries(savedLay.h).forEach(([ri, h]) => {
+        const idx = Number(ri);
+        if (idx < sh.getMaxRows() && typeof h === 'number' && h >= 10) {
+          try { sh.setRowHeight(idx, h); } catch (e) { /* ignore */ }
+          appliedH[idx] = h;
+        }
+      });
+    }
+    // 冻结：报表默认 + 用户记忆覆盖
+    let fz = spec.freeze ? { y: spec.freeze.rows || 0, x: spec.freeze.cols || 0 } : null;
+    if (savedLay && savedLay.fz && (savedLay.fz.y || savedLay.fz.x)) fz = { y: savedLay.fz.y || 0, x: savedLay.fz.x || 0 };
+    if (fz && (fz.y || fz.x)) { try { sh.setFrozenRows(fz.y || 0); } catch (e) { /* ignore */ } try { sh.setFrozenColumns(fz.x || 0); } catch (e) { /* ignore */ } }
+    // 用户修饰回放（只写样式不动值）+ 记录基线（供离开/关闭时差分保存）
+    const userSt = S.userStyles[layKey] || {};
+    Object.entries(userSt).forEach(([k, styleObj]) => {
+      const parts = k.split(':');
+      try { sh.getRange(Number(parts[0]), Number(parts[1]), 1, 1).setValues([[{ s: styleObj }]]); } catch (e) { /* ignore */ }
+    });
+    S.appliedLayouts[layKey] = { w: finalWidths, h: appliedH, fz };
+    S.appliedStyles[layKey] = captureCellStyles(sh);
+    try { sh.activate(); } catch (e) { /* ignore */ }
+    placeDashMounts();
+  }
+
+  // 左面板：客户列表（点行选中、搜索框过滤、选中行高亮）
+  async function renderDashList() {
+    const dd = S.dash.cache || {};
+    const ranking0 = (dd.rankings && dd.rankings[S.dash.period]) || [];
+    const q = String(S.dash.query || '').trim().toLowerCase();
+    const ranking = q ? ranking0.filter((r) => String(r[0]).toLowerCase().includes(q) || String(r[1] || '').toLowerCase().includes(q)) : ranking0;
+    S.dash.rowMap = {};
+    const values = [[t('custNo'), t('custName'), t('dashTotalAmt'), t('colRep1'), t('colRep2')]];
+    let selRow = 0;
+    ranking.forEach((r, i) => {
+      S.dash.rowMap[i + 1] = r[0];   // mouseup 读 0 基行号：第 i+1 行对应第 i 个客户
+      values.push([r[0], r[1], r[2], r[3], r[4]]);
+      if (r[0] === S.dash.customerNo) selRow = i + 2;   // 1 基工作表行号（第 1 行是表头，客户从第 2 行起）
+    });
+    const spec = { sheet: '客户列表', values, numFmt: [], bold: [], bg: [], freeze: { rows: 1, cols: 0 } };
+    const n = values.length;
+    if (n > 1) spec.numFmt.push({ range: 'C2:C' + n, fmt: '#,##0.00;-#,##0.00;' });
+    spec.bg.push({ range: 'A1:E1', color: '#d9eaf7' });
+    if (selRow) spec.bg.push({ range: 'A' + selRow + ':E' + selRow, color: '#dbe9ff' });
+    await renderDashSheet('list', spec);
+  }
+
+  // 右上面板：年份表（全部历史，A:D）+ 最近12个完整月表（F:I），各带合计行
+  async function renderDashAna() {
+    const dd = S.dash.cache || {};
+    const cust = dd.customers ? dd.customers[S.dash.customerNo] : null;
     const titleEl = $('#dash-cust-title');
-    if (!cust) { wrap.innerHTML = ''; if (titleEl) titleEl.textContent = ''; return; }
-    if (titleEl) titleEl.textContent = cust.no + '  ' + cust.name;
-    const mkHead = (first) => '<tr><th>' + esc(first) + '</th><th>' + esc(t('dashTotalAmt')) + '</th><th>' + esc(t('dashCabinetAmt')) + '</th><th>' + esc(t('dashStoneAmt')) + '</th></tr>';
-    // 年度（全部历史，按年份升序）——对应原表「年份/总金额/橱柜金额/石材金额」+ 合计
-    let yHtml = '<div><table class="grid"><thead>' + mkHead(t('dashYear')) + '</thead><tbody>';
-    let yt = 0, yc = 0, ys = 0;
-    Object.keys(cust.years || {}).sort().forEach((yr) => {
-      const m = cust.years[yr];
-      yt += m.total; yc += m.cabinet; ys += m.stone;
-      yHtml += '<tr><td>' + esc(yr) + '</td><td class="num">' + fmtMoneyZ(m.total) + '</td><td class="num">' + fmtMoneyZ(m.cabinet) + '</td><td class="num">' + fmtMoneyZ(m.stone) + '</td></tr>';
-    });
-    yHtml += '<tr class="totals"><td>' + esc(t('total')) + '</td><td class="num">' + fmtMoneyZ(yt) + '</td><td class="num">' + fmtMoneyZ(yc) + '</td><td class="num">' + fmtMoneyZ(ys) + '</td></tr></tbody></table></div>';
-    // 月度（最近12个完整月份）——对应原表「月份/总金额/橱柜金额/石材金额」+ 合计
-    let mHtml = '<div><table class="grid"><thead>' + mkHead(t('dashMonth')) + '</thead><tbody>';
-    let tt = 0, tc = 0, ts = 0;
-    dd.monthKeys.forEach((mk) => {
-      const m = cust.months[mk];
-      tt += m.total; tc += m.cabinet; ts += m.stone;
-      mHtml += '<tr><td>' + esc(mk) + '</td><td class="num">' + fmtMoneyZ(m.total) + '</td><td class="num">' + fmtMoneyZ(m.cabinet) + '</td><td class="num">' + fmtMoneyZ(m.stone) + '</td></tr>';
-    });
-    mHtml += '<tr class="totals"><td>' + esc(t('total')) + '</td><td class="num">' + fmtMoneyZ(tt) + '</td><td class="num">' + fmtMoneyZ(tc) + '</td><td class="num">' + fmtMoneyZ(ts) + '</td></tr></tbody></table></div>';
-    wrap.innerHTML = '<div class="ana-tables">' + yHtml + mHtml + '</div>';
+    if (titleEl) titleEl.textContent = cust ? cust.no + '  ' + cust.name : '';
+    const moneyHead = (first) => [first, t('dashTotalAmt'), t('dashCabinetAmt'), t('dashStoneAmt')];
+    const yearRows = [moneyHead(t('dashYear'))];
+    const monthRows = [moneyHead(t('dashMonth'))];
+    if (cust) {
+      let yt = 0, yc = 0, ys = 0;
+      Object.keys(cust.years || {}).sort().forEach((yr) => {
+        const m = cust.years[yr]; yt += m.total; yc += m.cabinet; ys += m.stone;
+        yearRows.push([yr, m.total, m.cabinet, m.stone]);
+      });
+      yearRows.push([t('total'), yt, yc, ys]);
+      let tt = 0, tc = 0, ts = 0;
+      dd.monthKeys.forEach((mk) => {
+        const m = cust.months[mk]; tt += m.total; tc += m.cabinet; ts += m.stone;
+        monthRows.push([mk, m.total, m.cabinet, m.stone]);
+      });
+      monthRows.push([t('total'), tt, tc, ts]);
+    }
+    const nR = Math.max(yearRows.length, monthRows.length, 1);
+    const values = [];
+    for (let i = 0; i < nR; i++) values.push(['', '', '', '', '', '', '', '', '']);   // A..I（E 列空档）
+    yearRows.forEach((r, i) => { for (let c = 0; c < 4; c++) values[i][c] = r[c]; });
+    monthRows.forEach((r, i) => { for (let c = 0; c < 4; c++) values[i][5 + c] = r[c]; });
+    const spec = { sheet: '客户动态分析', values, numFmt: [], bold: [], bg: [], freeze: { rows: 1, cols: 0 } };
+    const money = '#,##0.00;-#,##0.00;';
+    if (yearRows.length > 1) spec.numFmt.push({ range: 'B2:D' + yearRows.length, fmt: money });
+    if (monthRows.length > 1) spec.numFmt.push({ range: 'G2:I' + monthRows.length, fmt: money });
+    spec.bg.push({ range: 'A1:D1', color: '#d9eaf7' }, { range: 'F1:I1', color: '#d9eaf7' });
+    if (yearRows.length > 1) spec.bold.push(rngA(yearRows.length, 1, yearRows.length, 4));
+    if (monthRows.length > 1) spec.bold.push(rngA(monthRows.length, 6, monthRows.length, 9));
+    await renderDashSheet('ana', spec);
   }
 
   function renderDashChart() {
@@ -1811,31 +2257,23 @@
     if (row != null && row >= 0) sheetRowBg(row, '#dbe9ff');
   }
   function onSheetCell(row) {
-    // 行分组折叠切换：点击年份行（▸/▾）展开/收起月份行
-    if (S.activeRowGroups && row !== null && row !== undefined) {
-      const g = S.activeRowGroups.groups.find((x) => x.start - 1 === row);
-      if (g) {
-        try {
-          const wb = S.u.api.getActiveWorkbook();
-          const sh = wb.getSheets().find((s) => { try { return s.getSheetName() === S.activeRowGroups.sheet; } catch (e) { return false; } });
-          if (sh) {
-            if (g.collapsed) {
-              sh.showRows(g.start, g.end - g.start + 1);
-              const cell = sh.getRange(row, 0, 1, 1);
-              const v = String(cell.getValue() || '');
-              if (v.startsWith('▸')) cell.setValue('▾' + v.slice(1));
-            } else {
-              sh.hideRows(g.start, g.end - g.start + 1);
-              const cell = sh.getRange(row, 0, 1, 1);
-              const v = String(cell.getValue() || '');
-              if (v.startsWith('▾')) cell.setValue('▸' + v.slice(1));
-            }
+    // 年度销售总表：点击年份行 → 折叠/展开该年月份行（行高 26↔0）
+    try {
+      if (S.nav === 'r:annual' && S.yearToggle && row !== null && row !== undefined) {
+        const g = (S.yearToggle.groups || []).find((x) => x.row === row + 1);   // row 0 基 → 1 基
+        if (g) {
+          const wbY = S.u.api.getActiveWorkbook();
+          const shY = wbY.getSheets().find((x) => { try { return x.getSheetName() === S.yearToggle.sheet; } catch (e) { return false; } });
+          if (shY) {
             g.collapsed = !g.collapsed;
+            // 原生行隐藏：行高 0 会被引擎钳到最小值，hideRows/showRows 才是真隐藏
+            const first = g.months[0] - 1, count = g.months.length;
+            try { if (g.collapsed) shY.hideRows(first, count); else shY.showRows(first, count); } catch (e) { /* ignore */ }
           }
-        } catch (e) { /* ignore */ }
-        return;  // 分组切换不触发行选中
+          return;   // 年份行不进入行选中逻辑
+        }
       }
-    }
+    } catch (e) { /* ignore */ }
     const ctx = S.sheetCtx;
     if (!ctx || row === null || row === undefined || row < ctx.startRow) return;
     const idx = row - ctx.startRow;
@@ -1851,14 +2289,26 @@
 
   let salesToken = 0;
   async function renderSales() {
+    const all = !S.pageSize;   // pageSize=0 = 加载全部
+    const tk = 'sales:' + S.dataToken + ':' + JSON.stringify(S.salesFilters) + ':' + S.salesPage + ':' + (all ? 'all' : S.pageSize);
+    if (await activateIfFresh(t('tabSales'), tk)) return;
     const token = ++salesToken;
     let res;
-    try { res = await api('query_sales', S.salesPage * S.pageSize, S.pageSize, JSON.stringify(S.salesFilters)); } catch (e) { return; }
+    const ALL_CAP = 60000;   // 全部档上限（真实数据 5.35 万行全量可渲染）
+    try {
+      res = await normalizeQuery(await api('query_sales', all ? 0 : S.salesPage * S.pageSize, all ? ALL_CAP : S.pageSize, JSON.stringify(S.salesFilters)));
+    } catch (e) { toast('Load error: ' + (e && e.message ? e.message : e)); return; }
     if (token !== salesToken) return;
-    const pages = Math.max(1, Math.ceil(res.total / S.pageSize));
-    if (S.salesPage >= pages) S.salesPage = pages - 1;
-    const start = S.salesPage * S.pageSize;
-    $('#sales-info').textContent = res.total ? (start + 1) + '-' + Math.min(start + S.pageSize, res.total) + ' / ' + res.total : '';
+    if (!res || !Array.isArray(res.rows)) { toast('Load error: bad response'); return; }
+    const pages = all ? 1 : Math.max(1, Math.ceil(res.total / S.pageSize));
+    if (!all && S.salesPage >= pages) S.salesPage = pages - 1;
+    const start = all ? 0 : S.salesPage * S.pageSize;
+    S.lastSalesTotal = res.total;
+    $('#sales-info').textContent = res.total
+      ? (all
+        ? (res.rows.length < res.total ? res.rows.length + ' / ' + res.total + ' (' + t('allCapHint') + ')' : res.total + ' / ' + res.total)
+        : (start + 1) + '-' + Math.min(start + S.pageSize, res.total) + ' / ' + res.total)
+      : '';
     $('#sales-page').textContent = (S.salesPage + 1) + ' / ' + pages;
     const values = [SALES_COLS.map(([, lk]) => t(lk))];
     res.rows.forEach((r) => values.push(SALES_COLS.map(([k]) => (r[k] === null || r[k] === undefined ? '' : r[k]))));
@@ -1872,6 +2322,7 @@
       ],
       freeze: { rows: 1, cols: 0 },
     });
+    S.sheetToken[t('tabSales')] = tk;
     S.lastHLRow = null;
   }
 
@@ -1906,12 +2357,15 @@
   // ================= customers page =================
   const CUST_COLS = [['no', 'custNo'], ['name', 'custName'], ['sales1', 'colRep1'], ['created', 'custCreated'], ['city', 'colCity'], ['state', 'colState'], ['phone', 'colPhone'], ['contact', 'colContact'], ['type', 'colCustType'], ['email', 'colEmail']];
   async function renderCustomers() {
+    const tk = 'cust:' + S.dataToken + ':' + (S.custQuery || '');
+    if (await activateIfFresh(t('tabCustomers'), tk)) return;
     const list = await api('get_all_customers', S.custQuery);
     $('#cust-count').textContent = list.length ? String(list.length) : '';
     const values = [CUST_COLS.map(([, lk]) => t(lk))];
     list.slice(0, 5000).forEach((r) => values.push(CUST_COLS.map(([k]) => (r[k] === null || r[k] === undefined ? '' : r[k]))));
     S.sheetCtx = { kind: 'customers', rows: list.slice(0, 5000), startRow: 1, colCount: CUST_COLS.length };
     await renderSpec({ sheet: t('tabCustomers'), values, freeze: { rows: 1, cols: 0 } });
+    S.sheetToken[t('tabCustomers')] = tk;
     S.lastHLRow = null;
   }
 
@@ -1946,6 +2400,8 @@
   // ================= inventory page =================
   const INV_COLS = [['itemNo', 'invItemNo'], ['description', 'invDesc'], ['available', 'invAvailable'], ['inTransit', 'invInTransit'], ['stockCalc', 'invStock']];
   async function renderInventory() {
+    const tk = 'inv:' + S.dataToken + ':' + (S.invQuery || '');
+    if (await activateIfFresh(t('tabInventory'), tk)) return;
     const list = await api('get_all_stock', S.invQuery);
     $('#inv-count').textContent = list.length ? String(list.length) : '';
     const values = [INV_COLS.map(([, lk]) => t(lk))];
@@ -1961,6 +2417,7 @@
       numFmt: [{ range: 'C2:E' + n, fmt: '#,##0' }],
       freeze: { rows: 1, cols: 0 },
     });
+    S.sheetToken[t('tabInventory')] = tk;
     S.lastHLRow = null;
   }
 
@@ -1990,6 +2447,8 @@
 
   // ================= reps page =================
   async function renderReps() {
+    const tk = 'reps:' + S.dataToken;
+    if (await activateIfFresh(t('tabReps'), tk)) return;
     const reps = await api('get_all_reps');
     const s1 = reps.s1 || [], s2 = reps.s2 || [];
     const values = [[t('repsS1'), '', '', '']];
@@ -2005,6 +2464,7 @@
     const bold = [rngA(1, 1, 1, 4), rngA(2, 1, 2, 4), rngA(n - s2.length - 1, 1, n - s2.length - 1, 4), rngA(n - s2.length, 1, n - s2.length, 4)];
     const bg = [{ range: rngA(1, 1, 1, 4), color: '#d9e6f3' }, { range: rngA(n - s2.length - 1, 1, n - s2.length - 1, 4), color: '#d9e6f3' }];
     await renderSpec({ sheet: t('tabReps'), values, bold, bg, freeze: { rows: 0, cols: 0 } });
+    S.sheetToken[t('tabReps')] = tk;
     S.lastHLRow = null;
     // 网格映射：行号 → {kind, code, name, group}（直接编辑同步的基线；B=code C=name D=group）
     S.repSheetName = t('tabReps');
@@ -2036,7 +2496,7 @@
       const name = String(row[1] === null || row[1] === undefined ? '' : row[1]).trim();
       const group = String(row[2] === null || row[2] === undefined ? '' : row[2]).trim();
       if (name !== e.name || group !== e.group) {
-        api('upsert_rep', e.kind, JSON.stringify({ code: e.code, name, group }));
+        trackSave(api('upsert_rep', e.kind, JSON.stringify({ code: e.code, name, group })));
         e.name = name;
         e.group = group;   // 更新基线，避免重复写库
         saved++;
@@ -2191,7 +2651,7 @@
 
   async function importSalesFlow() {
     let res;
-    try { const files = await WebImport.pickFiles('.xlsx,.xls,.csv', true); if (!files.length) { toast(t('cancelled') || 'cancelled'); return; } res = await WebImport.readSalesFiles(files); } catch (e) { toast('Import error: ' + e); return; }
+    try { res = await api('import_sales_files'); } catch (e) { toast('Import error: ' + e); return; }
     if (!res || !res.ok) { toast((res && res.error) || 'Import cancelled'); return; }
     // 按月聚合：优先取每条记录销售日期的月份，取不到时回退文件名里的 YYYYMM
     const months = {};   // month → {records, file}
@@ -2261,7 +2721,7 @@
 
   async function importMasterFlow() {
     let res;
-    try { const files = await WebImport.pickFiles('.xlsx,.xls,.csv', false); if (!files.length) return; res = await WebImport.readMasterFile(files[0]); } catch (e) { toast('Import error: ' + e); return; }
+    try { res = await api('import_master_file'); } catch (e) { toast('Import error: ' + e); return; }
     if (!res || !res.ok) { toast((res && res.error) || 'Import cancelled'); return; }
     const ok = await confirmModal(tf('masterDone', {
       c: (res.customers || []).length,
@@ -2278,7 +2738,7 @@
   // 客户/库存单文件导入（表头自动识别）
   async function importCustomersFlow() {
     let res;
-    try { const files = await WebImport.pickFiles('.xlsx,.xls,.csv', false); if (!files.length) return; res = await WebImport.readCustomersFile(files[0]); } catch (e) { toast('Import error: ' + e); return; }
+    try { res = await api('import_customers_file'); } catch (e) { toast('Import error: ' + e); return; }
     if (!res || !res.ok) { toast((res && res.error) || 'Import cancelled'); return; }
     const list = res.customers || [];
     if (!list.length) { toast(t('noDataShort')); return; }
@@ -2293,7 +2753,7 @@
 
   async function importStockFlow() {
     let res;
-    try { const files = await WebImport.pickFiles('.xlsx,.xls,.csv', false); if (!files.length) return; res = await WebImport.readStockFile(files[0]); } catch (e) { toast('Import error: ' + e); return; }
+    try { res = await api('import_stock_file'); } catch (e) { toast('Import error: ' + e); return; }
     if (!res || !res.ok) { toast((res && res.error) || 'Import cancelled'); return; }
     const list = res.stock || [];
     if (!list.length) { toast(t('noDataShort')); return; }
@@ -2320,30 +2780,102 @@
   }
 
   // ================= backup / restore =================
-  // 网页版备份:直接下载整个数据库文件(单机用户最简单可靠)
   async function exportBackup() {
-    WebImport.downloadBackup();
-    toast(t('backupDone') || 'Backup downloaded');
+    const body = document.createElement('div');
+    body.className = 'form';
+    body.innerHTML =
+      '<div class="form-row full"><label class="chk"><input type="radio" name="bkmode" value="full" checked> ' + esc(t('bkFull')) + '</label></div>' +
+      '<div class="form-row full"><label class="chk"><input type="radio" name="bkmode" value="sales"> ' + esc(t('bkSales')) + '</label></div>' +
+      '<div class="form-row" id="bk-sales-opts" style="display:none">' +
+      '  <span>' + esc(t('bkMonthFrom')) + '</span><input type="month" id="bk-m-from">' +
+      '  <span>' + esc(t('bkMonthTo')) + '</span><input type="month" id="bk-m-to">' +
+      '  <label class="chk"><input type="checkbox" id="bk-withmaster" checked> ' + esc(t('bkWithMaster')) + '</label>' +
+      '</div>' +
+      '<div class="form-row full"><label class="chk"><input type="radio" name="bkmode" value="master"> ' + esc(t('bkMaster')) + '</label></div>';
+    showModal(t('bkExportTitle'), body, [
+      { label: t('cancel') },
+      {
+        label: t('btnGenerate'), primary: true, onClick: async (close) => {
+          const mode = body.querySelector('input[name="bkmode"]:checked').value;
+          const opts = { mode };
+          if (mode === 'sales') {
+            opts.monthStart = body.querySelector('#bk-m-from').value || '';
+            opts.monthEnd = body.querySelector('#bk-m-to').value || '';
+            opts.withMaster = body.querySelector('#bk-withmaster').checked;
+          }
+          close();
+          try {
+            const res = await api('export_backup', JSON.stringify(opts));
+            if (res && res.ok) toast(tf('backupDone', { p: res.path }));
+            else toast(res && res.error ? 'Export failed: ' + res.error : 'Cancelled');
+          } catch (e) { toast(tf('backupFail', { e })); }
+        },
+      },
+    ]);
+    body.querySelectorAll('input[name="bkmode"]').forEach((r) => {
+      r.addEventListener('change', () => {
+        body.querySelector('#bk-sales-opts').style.display =
+          body.querySelector('input[name="bkmode"]:checked').value === 'sales' ? 'flex' : 'none';
+      });
+    });
   }
 
-  // 网页版恢复:上传 .db 文件整体替换,完成后刷新
   async function restoreBackup() {
-    const ok = await confirmModal(t('bkRestoreConfirm') || 'Restore will replace the current database. Continue?', t('confirm'));
-    if (!ok) return;
-    const res = await WebImport.uploadBackup();
-    if (!res || !res.ok) {
-      if (res && res.error && res.error !== 'cancelled') toast('Restore failed: ' + res.error);
+    let info;
+    try { info = await api('backup_inspect'); } catch (e) { toast('Restore error: ' + e); return; }
+    if (!info || !info.ok) {
+      if (info && info.error && info.error !== 'cancelled') toast(tf('restoreBad', { e: info.error }));
       return;
     }
-    invalidateCtx();
-    const meta = await api('get_meta');
-    LANG = meta.lang === 'zh' ? 'zh' : 'en';
-    applyI18n();
-    await invalidateStatOutputs();
-    navigate('sales');
-    toast(t('restoreDone') || 'Restored');
+    const zh = LANG === 'zh';
+    const body = document.createElement('div');
+    body.className = 'form';
+    const monthList = info.months.map((m) => m.month + ' (' + m.rows + ')').join(', ') || (zh ? '无' : 'none');
+    body.innerHTML =
+      '<div class="confirm-text">' + esc(t('bkContains')) + ': ' + esc(monthList) + ' — ' + info.salesTotal + ' rows; ' +
+      esc(t('custNo')) + ' ' + info.customers + ' · ' + esc(t('invStock')) + ' ' + info.stock + ' · ' + esc(t('repCode')) + ' ' + info.reps + '</div>' +
+      '<div class="form-row full"><label class="chk"><input type="radio" name="rsmode" value="merge" checked> ' + esc(t('bkModeMerge')) + '</label></div>' +
+      '<div class="form-row" id="rs-merge-opts">' +
+      '  <span>' + esc(t('bkMonthConflict')) + '</span><select id="rs-mc"><option value="replace">' + esc(t('cfReplace')) + '</option><option value="skip">' + esc(t('cfSkip')) + '</option></select>' +
+      '  <span>' + esc(t('bkMasterConflict')) + '</span><select id="rs-mmc"><option value="overwrite">' + esc(t('cfOverwrite')) + '</option><option value="skip">' + esc(t('cfSkip')) + '</option></select>' +
+      '</div>' +
+      '<div class="form-row full"><label class="chk"><input type="radio" name="rsmode" value="replace"> ' + esc(t('bkModeReplace')) + '</label></div>';
+    showModal(t('bkRestoreTitle'), body, [
+      { label: t('cancel') },
+      {
+        label: t('bkExecute'), primary: true, onClick: async (close) => {
+          const mode = body.querySelector('input[name="rsmode"]:checked').value;
+          const payload = {
+            path: info.path, mode,
+            monthConflict: (body.querySelector('#rs-mc') || {}).value || 'skip',
+            masterConflict: (body.querySelector('#rs-mmc') || {}).value || 'overwrite',
+          };
+          close();
+          const res = await api('backup_restore', JSON.stringify(payload));
+          if (!res || !res.ok) { toast('Restore failed: ' + (res && res.error)); return; }
+          if (mode === 'replace') {
+            const meta = await api('get_meta');
+            LANG = meta.lang === 'zh' ? 'zh' : 'en';
+            applyI18n();
+            await invalidateStatOutputs();
+            navigate('sales');
+          } else {
+            renderTab(S.nav);
+          }
+          toast(t('restoreDone'));
+          saved();
+        },
+      },
+    ]);
+    body.querySelectorAll('input[name="rsmode"]').forEach((r) => {
+      r.addEventListener('change', () => {
+        body.querySelector('#rs-merge-opts').style.display =
+          body.querySelector('input[name="rsmode"]:checked').value === 'merge' ? 'flex' : 'none';
+      });
+    });
   }
 
+  // ================= i18n apply =================
   function applyI18n() {
     document.querySelectorAll('[data-i18n]').forEach((el) => (el.textContent = t(el.dataset.i18n)));
     document.querySelectorAll('[data-i18n-ph]').forEach((el) => (el.placeholder = t(el.dataset.i18nPh)));
@@ -2352,6 +2884,7 @@
     if (S.nav.startsWith('r:')) renderStatCard();
     else renderTab(S.nav);
     document.documentElement.lang = LANG;
+    try { window.dispatchEvent(new Event('langchanged')); } catch (e) { /* ignore */ }
   }
 
   // ================= toolbar bindings =================
@@ -2442,6 +2975,48 @@
     bindFuzzyLookups();
     $('#sales-prev').onclick = () => { if (S.salesPage > 0) { S.salesPage--; renderSales(); } };
     $('#sales-next').onclick = () => { S.salesPage++; renderSales(); };
+    // 每页数量可选（含"全部"）：选择即生效并记住偏好
+    const sizeSel = $('#sales-pagesize');
+    const SIZE_OPTS = [100, 200, 500, 1000, 2000, 5000, 0];   // 0=全部（快照建表后万行级可用）
+    const fillSizes = () => {
+      sizeSel.innerHTML = SIZE_OPTS.map((n) =>
+        '<option value="' + n + '"' + (S.pageSize === n ? ' selected' : '') + '>' + (n === 0 ? t('allRows') : n) + '</option>').join('');
+    };
+    fillSizes();
+    sizeSel.onchange = () => {
+      S.pageSize = Number(sizeSel.value);
+      S.salesPage = 0;
+      try { api('set_pref', 'salesPageSize', String(S.pageSize)); } catch (e) { /* ignore */ }
+      renderSales();
+    };
+    // 语言切换时刷新"全部"文案（applyI18n 末尾派发 langchanged）
+    window.addEventListener('langchanged', fillSizes);
+    let dashTm = null;
+    $('#dash-search').addEventListener('input', (e) => {
+      S.dash.query = e.target.value;
+      clearTimeout(dashTm);
+      dashTm = setTimeout(() => {
+        if (S.nav === 'dashboard' && S.dash.cache) renderDashList().catch(() => { /* ignore */ });
+      }, 300);
+    });
+    // 客户快速查询带上模糊下拉（与统计条件卡同一组件）：点候选直接选中该客户
+    try {
+      attachFuzzy($('#dash-search'), {
+        fetch: fuzzyCustomersCode,
+        onPick: (it, input) => {
+          const no = String((it && it.v) || '').trim();
+          if (!no) return;
+          S.dash.customerNo = no;
+          input.value = '';
+          S.dash.query = '';
+          if (S.nav === 'dashboard' && S.dash.cache) {
+            renderDashList().catch(() => { /* ignore */ });
+            renderDashAna();
+            renderDashChart();
+          }
+        },
+      });
+    } catch (e) { /* ignore */ }
     $('#sales-import').onclick = importSalesFlow;
     $('#sales-delmonth').onclick = () => navigate('history');
     let custTm = null;
@@ -2495,7 +3070,13 @@
   let toolbarsBound = false;
   async function applyLocaleAndRender() {
     let meta = {};
-    try { meta = (await api('get_meta')) || {}; } catch (e) { /* ignore */ }
+    try {
+      // 超时兜底：pywebview 桥接早期调用可能排队，3 秒未返回先用默认值渲染 UI（点击不致无响应）
+      meta = (await Promise.race([
+        api('get_meta'),
+        new Promise((res) => setTimeout(() => res({}), 3000)),
+      ])) || {};
+    } catch (e) { /* ignore */ }
     LANG = meta.lang === 'zh' ? 'zh' : 'en';
     if (meta.prefs && meta.prefs.sidebarCollapsed === '1') S.sidebarCollapsed = true;
     if (meta.prefs && meta.prefs.navCollapsed) {
@@ -2511,29 +3092,71 @@
     if (meta.prefs && meta.prefs.userStyles) {
       try { S.userStyles = JSON.parse(meta.prefs.userStyles) || {}; } catch (e) { S.userStyles = {}; }
     }
+    if (meta.prefs && meta.prefs.salesPageSize !== undefined) {
+      S.pageSize = Number(meta.prefs.salesPageSize);
+      if (!(S.pageSize >= 0)) S.pageSize = 200;
+    }
     if (!toolbarsBound) { toolbarsBound = true; bindToolbars(); }
     applyI18n();
     navigate(S.nav || 'sales');
     setStatus(t('appName') + ' · SQLite');
   }
 
-  // 布局/格式记忆自动保存：每 2.5s 快照一次（用户调整后直接关闭软件也不丢）
-  let memTimer = null;
-  function startMemoryAutoSave() {
-    if (memTimer) return;
-    memTimer = setInterval(() => {
-      if (S.isRendering || !S.u || !S.u.api) return;
-      let wb = null;
-      try { wb = S.u.api.getActiveWorkbook(); } catch (e) { return; }
-      if (!wb) return;
-      try { wb.getSheets().forEach((sh) => syncSheetMemory(sh)); } catch (e) { /* ignore */ }
-      syncRepsFromGrid();   // 分组表直接编辑 → 自动写库
-    }, 2500);
-  }
+  // 关闭确认（宿主 closing 事件调用）：原生 confirm 同步阻塞，宿主可可靠触发。
+  // 确定 → 冲刷全部未保存修改后调用 close_app 真正退出；取消 → 留在软件（closing 已被宿主阻止）。
+  window.__armClose = function () {
+    // 应用内自绘确认框（原生 confirm 会显示 127.0.0.1 来源横幅，不友好）
+    confirmModal(t('closeConfirm'), t('confirm')).then((ok) => {
+      if (!ok) return;   // 取消：closing 已被宿主阻止，留在软件
+      (async () => {
+        try { await window.__flushMemory(); } catch (e) { /* ignore */ }
+        try { await api('close_app'); } catch (e) { /* ignore */ }
+      })();
+    });
+    return 'closing';
+  };
 
+  // 关闭软件前的统一冲刷：捕获停留页面的最后调整，等所有异步保存落库完成。
+  // 宿主（app.py closing 事件）调用；平时保存时机=切换页面（navigate/renderSpec 钩子），不再需要定时器。
+  window.__flushMemory = async function () {
+    window.__flushDone = false;
+    try {
+      if (S.nav === 'reps' && S.repGrid) syncRepsFromGrid();
+      syncDashMemory();
+      if (S.u && S.u.api && S.lastRenderedSheet && !S.isRendering) {
+        const wb = S.u.api.getActiveWorkbook();
+        const prev = wb.getSheets().find((x) => { try { return x.getSheetName() === S.lastRenderedSheet; } catch (e) { return false; } });
+        if (prev) syncSheetMemory(prev);
+      }
+      await Promise.allSettled(S.pendingSaves.slice());
+    } catch (e) { /* ignore */ }
+    window.__flushDone = true;
+  };
+
+  let bootRenderTimer = null;
   function boot() {
-    startMemoryAutoSave();
-    applyLocaleAndRender();
+    // 异步异常不再静默：记录到 window.__errs 供排查（渲染/保存链路的 Promise 都不主动抛）
+    try {
+      window.addEventListener('unhandledrejection', (e) => {
+        try { (window.__errs = window.__errs || []).push(String((e.reason && e.reason.message) || e.reason)); } catch (x) { /* ignore */ }
+      });
+    } catch (e) { /* ignore */ }
+    // 页面可能在 pywebview 宿主里但宿主对象注入稍晚：mock 首渲染延迟 600ms 让位——
+    // 桥接在窗口期内注入则只做一次真实渲染，避免 mock+真实两次全量渲染并发卡死主线程。
+    bootRenderTimer = setTimeout(() => { bootRenderTimer = null; applyLocaleAndRender(); }, 600);
+    if (USING_MOCK) {
+      const iv = setInterval(() => {
+        if (!USING_MOCK) { clearInterval(iv); return; }
+        if (window.pywebview && window.pywebview.api && window.pywebview.api.get_meta) {
+          clearInterval(iv);
+          if (bootRenderTimer) { clearTimeout(bootRenderTimer); bootRenderTimer = null; }   // mock 首渲染未发生：取消，直接真实渲染
+          BRIDGE = window.pywebview.api;
+          USING_MOCK = false;
+          applyLocaleAndRender();
+        }
+      }, 200);
+      setTimeout(() => clearInterval(iv), 60000);
+    }
   }
 
   document.addEventListener('DOMContentLoaded', boot);

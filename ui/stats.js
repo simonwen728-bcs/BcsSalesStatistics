@@ -141,12 +141,7 @@ window.STATS = (function () {
   // ============================================================
   function annual(data, opts, t) {
     const spec = baseSpec('年度销售总表');
-    // 时间段（快速按钮 上月/今年/TTM/重置）：有范围时只统计范围内的销售，重置=全部
-    const rgA = range(opts.start, opts.end);
-    if (!rgA.success) return { error: rgA.message };
-    if (opts.start || opts.end) {
-      data = data.filter((r) => { const dt = date(r.soldDate); return dt && inRange(dt, rgA); });
-    }
+    // 年度统计固定读全部历史（用户口径：不需要时间段）
     // categories: distinct Type values in data
     const catSet = new Set();
     data.forEach((r) => {
@@ -204,20 +199,20 @@ window.STATS = (function () {
     spec.values.push(header);
 
     const boldRows = [];
-    const rowGroups = [];  // 月份行分组(默认折叠):{start, end} 0-based,对应 values 数组下标
+    const yearGroups = [];   // 年份行(1基)与该年月份行(1基)列表——供前端点击年份行折叠/展开
     yearList.forEach((year) => {
       spec.values.push([year, years[year].total.total, years[year].total.ic, years[year].total.net,
         ...categories.flatMap((c) => [years[year].total.cats[c] || 0, years[year].total.net ? (years[year].total.cats[c] || 0) / years[year].total.net : 0])]);
       boldRows.push(spec.values.length);
-      const monthStart = spec.values.length;  // 0-based start (values.length 是下一行的 1-based,即当前行的 0-based+1)
+      const g = { row: spec.values.length, months: [] };
       Object.keys(years[year].months).sort().forEach((month) => {
         const m = years[year].months[month];
         spec.values.push([month, m.total, m.ic, m.net, ...categories.flatMap((c) => [m.cats[c] || 0, m.net ? (m.cats[c] || 0) / m.net : 0])]);
+        g.months.push(spec.values.length);
       });
-      const monthEnd = spec.values.length - 1;  // 0-based end
-      if (monthEnd >= monthStart) rowGroups.push({ start: monthStart, end: monthEnd });
+      yearGroups.push(g);
     });
-    spec.rowGroups = rowGroups;
+    spec.yearGroups = yearGroups;   // 注意：不要给 annual 设 spec.info（提示走 toast）——info 会加 2 行偏移使 yearGroups 行号错位
     spec.values.push(['TTM', ytd.total, ytd.ic, ytd.net, ...categories.flatMap((c) => [ytd.cats[c] || 0, ytd.net ? (ytd.cats[c] || 0) / ytd.net : 0])]);
     boldRows.push(spec.values.length);
     spec.values.push(['合计', grand.total, grand.ic, grand.net, ...categories.flatMap((c) => [grand.cats[c] || 0, grand.net ? (grand.cats[c] || 0) / grand.net : 0])]);
@@ -237,7 +232,6 @@ window.STATS = (function () {
     spec.widths = [[1, 130], ...Array.from({ length: lastCol - 1 }, (_, i) => [i + 2, 115])];
     spec.freeze = { rows: 1, cols: 0 };
     spec.bg.push({ range: 'A1:' + colLetter(lastCol) + '1', color: '#1f4e78' });
-    if (opts.start || opts.end) spec.info = (opts.start || '...') + ' - ' + (opts.end || '...');
     return spec;
   }
 
@@ -267,11 +261,9 @@ window.STATS = (function () {
       const group = String(r.group || '').trim().toLowerCase();
       if (s2) {
         sales2Names[s2] = name || s2;
-        if (group === 'inside' || s2 === 'LP') insideSales2.add(s2);
+        if (group === 'inside') insideSales2.add(s2);   // 只认分组表数据，不再写死 LP（用户要求，组别变化自动跟随）
       }
     });
-    insideSales2.add('LP');
-    if (!sales2Names.LP) sales2Names.LP = 'Lawreen Paulemond';
 
     const sales1Amount = {};
     const matrix = {};
@@ -309,9 +301,11 @@ window.STATS = (function () {
       if (!groupMap[g]) groupMap[g] = [];
       groupMap[g].push(code);
     });
+    const isHouseGroup = (g) => String(g || '').trim().toLowerCase() === 'house';
     const groups = Object.keys(groupMap).sort((a, b) => {
-      if (a === 'House' && b !== 'House') return -1;
-      if (a !== 'House' && b === 'House') return 1;
+      const ha = isHouseGroup(a), hb = isHouseGroup(b);
+      if (ha && !hb) return -1;
+      if (!ha && hb) return 1;
       return a.localeCompare(b);
     });
 
@@ -321,7 +315,7 @@ window.STATS = (function () {
     groups.forEach((groupName) => {
       const codes = groupMap[groupName];
       codes.sort((a, b) => {
-        if (groupName === 'House') {
+        if (isHouseGroup(groupName)) {
           if (a === 'HO' && b !== 'HO') return -1;
           if (a !== 'HO' && b === 'HO') return 1;
         }
@@ -336,45 +330,52 @@ window.STATS = (function () {
       subtotalRowIdx.push(leftRows.length);
     });
 
-    // right side
-    const houseCodes = groupMap['House'] || [];
+    // right side（组名大小写不敏感：用户库里可能是 HOUSE/House/other branch 等写法，原版只认 'House' 会整块落空）
+    const houseKey = Object.keys(groupMap).find((g) => isHouseGroup(g)) || null;
+    const houseCodes = houseKey ? groupMap[houseKey] : [];
     const houseInsideTotals = {};
     sales2List.forEach((s2) => {
       houseInsideTotals[s2] = houseCodes.reduce((sum, c) => sum + (matrix[c] ? matrix[c][s2] || 0 : 0), 0);
     });
     const grandHouseInside = sales2List.reduce((sum, s2) => sum + (houseInsideTotals[s2] || 0), 0);
 
+    // 右块（各销售2列+Inside 小计+两个占比行）完全由分组表驱动：没有任何 Inside 销售2 时整块省略，
+    // 只保留 Sale 1 总计行（无 HO 合计/占比的概念）
     const rightRows = [];
-    rightRows.push(['', ...sales2List.map((s2) => sales2Names[s2] || s2)]);
-    for (let r = 1; r < leftRows.length; r++) {
-      const deptLabel = String(leftRows[r][0] || '');
-      const sales1Name = String(leftRows[r][1] || '');
-      if (deptLabel === 'House 小计' || deptLabel === 'House Subtotal') {
-        rightRows.push(['Inside 小计', ...sales2List.map((s2) => houseInsideTotals[s2] || 0)]);
-        continue;
+    if (sales2List.length) {
+      rightRows.push(['', ...sales2List.map((s2) => sales2Names[s2] || s2)]);
+      for (let r = 1; r < leftRows.length; r++) {
+        const deptLabel = String(leftRows[r][0] || '');
+        const sales1Name = String(leftRows[r][1] || '');
+        if (deptLabel.endsWith(' 小计') || deptLabel.endsWith(' Subtotal')) {
+          const gname = deptLabel.replace(/ (小计|Subtotal)\s*$/, '').trim().toLowerCase();
+          if (gname === 'house') {
+            rightRows.push(['Inside 小计', ...sales2List.map((s2) => houseInsideTotals[s2] || 0)]);
+          } else {
+            rightRows.push(new Array(1 + sales2List.length).fill(''));
+          }
+          continue;
+        }
+        let code = '';
+        Object.keys(sales1Info).some((c) => {
+          if (sales1Info[c].name === sales1Name) { code = c; return true; }
+          return false;
+        });
+        const rr = [''];
+        sales2List.forEach((s2) => rr.push(code && matrix[code] ? matrix[code][s2] || 0 : 0));
+        rightRows.push(rr);
       }
-      if (deptLabel.endsWith(' 小计') || deptLabel.endsWith(' Subtotal')) {
-        rightRows.push(new Array(1 + sales2List.length).fill(''));
-        continue;
-      }
-      let code = '';
-      Object.keys(sales1Info).some((c) => {
-        if (sales1Info[c].name === sales1Name) { code = c; return true; }
-        return false;
-      });
-      const rr = [''];
-      sales2List.forEach((s2) => rr.push(code && matrix[code] ? matrix[code][s2] || 0 : 0));
-      rightRows.push(rr);
     }
-
     leftRows.push(['Sale 1 总计', '', grandSales1, '', 1]);
-    rightRows.push(['部门占比', ...sales2List.map((s2) => (grandHouseInside ? (houseInsideTotals[s2] || 0) / grandHouseInside : 0))]);
-    leftRows.push(['HO 合计', '', grandHouseInside, '', grandSales1 ? grandHouseInside / grandSales1 : 0]);
-    rightRows.push(['总额占比', ...sales2List.map((s2) => (grandSales1 ? (houseInsideTotals[s2] || 0) / grandSales1 : 0))]);
+    if (sales2List.length) {
+      rightRows.push(['部门占比', ...sales2List.map((s2) => (grandHouseInside ? (houseInsideTotals[s2] || 0) / grandHouseInside : 0))]);
+      leftRows.push(['HO 合计', '', grandHouseInside, '', grandSales1 ? grandHouseInside / grandSales1 : 0]);
+      rightRows.push(['总额占比', ...sales2List.map((s2) => (grandSales1 ? (houseInsideTotals[s2] || 0) / grandSales1 : 0))]);
+    }
 
     const rowCount = Math.max(leftRows.length, rightRows.length);
     while (leftRows.length < rowCount) leftRows.push(['', '', '', '', '']);
-    while (rightRows.length < rowCount) rightRows.push(new Array(1 + sales2List.length).fill(''));
+    while (rightRows.length < rowCount) rightRows.push(sales2List.length ? new Array(1 + sales2List.length).fill('') : []);
     const output = leftRows.map((row, i) => row.concat(rightRows[i]));
     spec.values = output;
 
@@ -427,11 +428,9 @@ window.STATS = (function () {
       const group = String(r.group || '').trim().toLowerCase();
       if (s2) {
         sales2Names[s2] = name;
-        if (group === 'inside' || s2 === 'LP') insideSales2.add(s2);
+        if (group === 'inside') insideSales2.add(s2);   // 只认分组表数据，不再写死 LP
       }
     });
-    insideSales2.add('LP');
-    if (!sales2Names.LP) sales2Names.LP = 'Lawreen Paulemond';
 
     const newStat = () => ({ invoices: new Set(), customers: new Set(), total: 0, cabinet: 0, stone: 0 });
     const s1Stats = {}, s2Stats = {};
@@ -1174,20 +1173,23 @@ window.STATS = (function () {
     const invoiceF = norm(opts.invoice);
     const itemF = norm(opts.itemNo);
     const custF = norm(opts.custNo);
-    // 不再强制要求附加条件：不填客户/品名/发票时 = 列出时间段内全部明细（最近在前）
+    const sales1F = norm(opts.sales);
     const rg = range(opts.start, opts.end);
     if (!rg.success) return { error: rg.message };
     const inP = (dt) => { if (!rg.start && !rg.end) return true; return inRange(dt, rg); };
+    // 原版业务规则：销售历史查询一律排除 IC（只有年度销售总表保留 IC）
+    const gmapIC = sales1Groups(opts.reps || { s1: [], s2: [] });
     const src = [];
     data.forEach((r) => {
       const dt = date(r.soldDate);
       if (!dt || !inP(dt)) return;
-      // 过滤：有发票/品名/客户条件时按对应字段精确匹配；三者皆空 = 不筛（列出全部）
-      const matchF = invoiceF ? norm(r.invoice) === invoiceF
-        : itemF ? norm(r.itemNo) === itemF
-        : custF ? norm(r.custNo) === custF
-        : true;
-      if (!matchF) return;
+      // 组合查询（原版口径）：填了哪些条件就必须同时满足哪些（AND）
+      if (invoiceF && norm(r.invoice) !== invoiceF) return;
+      if (itemF && norm(r.itemNo) !== itemF) return;
+      if (custF && norm(r.custNo) !== custF) return;
+      const rep1 = String(r.rep1 || '').trim();
+      if (sales1F && norm(rep1) !== sales1F) return;
+      if (isIC(norm(rep1), gmapIC)) return;
       const rawCat = String(r.type || '').trim();
       const up = rawCat.toUpperCase().replace(/\s+/g, '');
       // V64 成本规则：SLAB 的 S 列是单位成本需 ×数量；其他类别 S 列已是整行成本
@@ -1195,7 +1197,7 @@ window.STATS = (function () {
       src.push({
         item: String(r.itemNo || '').trim(), desc: String(r.description || '').trim(),
         dt, invoice: String(r.invoice || '').trim(), cust: String(r.custNo || '').trim(),
-        name: String(r.custName || '').trim(), rep: String(r.rep1 || '').trim(),
+        name: String(r.custName || '').trim(), rep: String(r.rep1 || '').trim(), s2: String(r.rep2 || '').trim(),
         color: String(r.color || '').trim(), rawCat,
         cat: (up === 'CABINET' || up === 'CABINETOTHERS') ? 'Cabinet' : 'Stone',
         qty: amount(r.qty), amt: amount(r.amount),
@@ -1209,21 +1211,76 @@ window.STATS = (function () {
     const money = '#,##0.00;-#,##0.00;';
     const qtyFmt = '#,##0;-#,##0;';
 
-    if (!custF && !itemF && !invoiceF) {
-      // 无附加条件：时间段内全部明细，最近在前（配合快速时间段 上月/今年/TTM/重置 使用）
-      spec.values.push(['Sold Date', 'Invoice No.', 'Item No', 'Description', 'Color',
-        'Customer No', 'Customer Name', 'Sales 1', 'Qty', 'Amount', 'Cost']);
-      src.sort((a, b) => b.dt.localeCompare(a.dt)).forEach((x) => {
-        spec.values.push([x.dt, x.invoice, x.item, x.desc, x.color, x.cust, x.name, x.rep, x.qty, x.amt, x.cost]);
+    // 合并工具：按发票号码合并（原版口径）——同发票多行合计数量/金额/成本、日期取最近、客户取第一个非空
+    const mergeByInvoice = (withSales) => {
+      const grouped = new Map();
+      src.forEach((x) => {
+        const key = norm(x.invoice);
+        if (!grouped.has(key)) grouped.set(key, { dt: x.dt, invoice: x.invoice, cats: new Set(), qty: 0, amt: 0, cost: 0, cust: '', name: '', s1: new Set(), s2: new Set() });
+        const g = grouped.get(key);
+        if (x.dt > g.dt) g.dt = x.dt;
+        g.cats.add(x.cat); g.qty += x.qty; g.amt += x.amt; g.cost += x.cost;
+        if (!g.cust && x.cust) g.cust = x.cust;
+        if (!g.name && x.name) g.name = x.name;
+        if (x.rep) g.s1.add(x.rep);
+        if (x.s2) g.s2.add(x.s2);
+      });
+      return Array.from(grouped.values()).sort((a, b) => b.dt.localeCompare(a.dt) || String(a.invoice).localeCompare(String(b.invoice)));
+    };
+    const catOf = (cats) => {
+      if (cats.has('Cabinet') && cats.has('Stone')) return 'Cabinet / Stone';
+      return cats.has('Cabinet') ? 'Cabinet' : 'Stone';
+    };
+    const totalRow = (qtyIdx, amtIdx, costIdx, costCol1) => {
+      const row = ['Total', '', '',
+        spec.values.slice(1).reduce((s2, r) => s2 + (Number(r[qtyIdx]) || 0), 0),
+        spec.values.slice(1).reduce((s2, r) => s2 + (Number(r[amtIdx]) || 0), 0)];
+      while (row.length < costCol1 - 1) row.push('');
+      row.push(spec.values.slice(1).reduce((s2, r) => s2 + (Number(r[costIdx]) || 0), 0));
+      return row;
+    };
+
+    if (!custF && !itemF && !invoiceF && !sales1F) {
+      // 无附加条件：按发票号码合并（原版口径），最近在前；Sales 1 / Sales 2 去重并列
+      const rows = mergeByInvoice(true);
+      spec.values.push(['Sold Date', 'Invoice No.', 'Category', 'Qty', 'Amount', 'Customer No', 'Customer Name', 'Sales 1', 'Sales 2', 'Cost']);
+      rows.forEach((g) => {
+        spec.values.push([g.dt, g.invoice, catOf(g.cats), g.qty, g.amt, g.cust, g.name, Array.from(g.s1).join(' / '), Array.from(g.s2).join(' / '), g.cost]);
       });
       const n = spec.values.length;
-      spec.numFmt.push({ range: 'I2:I' + n, fmt: qtyFmt },
-        { range: 'J2:J' + n, fmt: money }, { range: 'K2:K' + n, fmt: money });
-      spec.align = [{ range: 'A2:H' + n, horiz: 'left' }];
+      spec.values.push(totalRow(3, 4, 9, 10));
+      spec.numFmt.push({ range: 'D2:D' + (n + 1), fmt: qtyFmt },
+        { range: 'E2:E' + (n + 1), fmt: money }, { range: 'J2:J' + (n + 1), fmt: money });
+      spec.align = [{ range: 'A2:C' + n, horiz: 'left' }, { range: 'F2:I' + n, horiz: 'left' }];
       spec.freeze = { rows: 1, cols: 0 };
-      spec.bold.push(rng(1, 1, 1, 11));
-      spec.bg.push({ range: rng(1, 1, 1, 11), color: '#d9eaf7' });
-      spec.info = 'All Transactions: ' + periodText + ' | ' + (n - 1) + ' rows';
+      spec.bold.push(rng(1, 1, 1, 10));
+      spec.bg.push({ range: rng(1, 1, 1, 10), color: '#d9eaf7' });
+      spec.bold.push(rng(n + 1, 1, n + 1, 10));
+      spec.bg.push({ range: rng(n + 1, 1, n + 1, 10), color: '#d9e6f3' });
+      spec.info = 'All Sales | Period: ' + periodText + ' | ' + rows.length + ' invoices';
+      return spec;
+    }
+
+    if (sales1F) {
+      // SALES 1 查询（原版口径）：按发票号码合并，可与客户/品名/发票条件组合（AND）
+      const rows = mergeByInvoice(false);
+      spec.values.push(['Sold Date', 'Invoice No.', 'Category', 'Qty', 'Amount', 'Customer No', 'Customer Name', 'Cost']);
+      rows.forEach((g) => {
+        spec.values.push([g.dt, g.invoice, catOf(g.cats), g.qty, g.amt, g.cust, g.name, g.cost]);
+      });
+      const n = spec.values.length;
+      spec.values.push(totalRow(3, 4, 7, 8));
+      spec.numFmt.push({ range: 'D2:D' + (n + 1), fmt: qtyFmt },
+        { range: 'E2:E' + (n + 1), fmt: money }, { range: 'H2:H' + (n + 1), fmt: money });
+      spec.align = [{ range: 'A2:C' + n, horiz: 'left' }, { range: 'F2:G' + n, horiz: 'left' }];
+      spec.freeze = { rows: 1, cols: 0 };
+      spec.bold.push(rng(1, 1, 1, 8));
+      spec.bg.push({ range: rng(1, 1, 1, 8), color: '#d9eaf7' });
+      spec.bold.push(rng(n + 1, 1, n + 1, 8));
+      spec.bg.push({ range: rng(n + 1, 1, n + 1, 8), color: '#d9e6f3' });
+      const repInfo = ((opts.reps && opts.reps.s1) || []).find((r) => norm(r.code) === sales1F);
+      const repName = repInfo ? (repInfo.name || '') : '';
+      spec.info = 'Sales 1: ' + sales1F + (repName ? ' | ' + repName : '') + ' | Period: ' + periodText + ' | ' + rows.length + ' invoices';
       return spec;
     }
 
@@ -1246,7 +1303,7 @@ window.STATS = (function () {
         spec.values.push([fmtDate(g.dt), g.invoice, cat, g.qty, g.amt, g.rep, g.cost]);
       });
       const n = spec.values.length;
-      spec.values.push(['Total', '', '', spec.values.slice(2).reduce((s, r) => s + r[3], 0), spec.values.slice(2).reduce((s, r) => s + r[4], 0), '', spec.values.slice(2).reduce((s, r) => s + r[6], 0)]);
+      spec.values.push(['Total', '', '', spec.values.slice(1).reduce((s, r) => s + r[3], 0), spec.values.slice(1).reduce((s, r) => s + r[4], 0), '', spec.values.slice(1).reduce((s, r) => s + r[6], 0)]);
       spec.numFmt.push({ range: 'D2:D' + n, fmt: qtyFmt }, { range: 'E2:E' + (n + 1), fmt: money }, { range: 'G2:G' + (n + 1), fmt: money });
       spec.bold.push(rng(n + 1, 1, n + 1, 7));
       spec.bg.push({ range: rng(n + 1, 1, n + 1, 7), color: '#d9e6f3' });
@@ -1269,7 +1326,7 @@ window.STATS = (function () {
         spec.values.push([i + 1, g.item, g.desc, g.color, g.cat, g.qty, g.qty !== 0 ? g.amt / g.qty : '', g.amt, g.cost]);
       });
       const n = spec.values.length;
-      const d = spec.values.slice(2);
+      const d = spec.values.slice(1);
       spec.values.push(['Total', '', '', '', '', d.reduce((s, r) => s + r[5], 0), '', d.reduce((s, r) => s + r[7], 0), d.reduce((s, r) => s + r[8], 0)]);
       spec.numFmt.push({ range: 'A2:A' + n, fmt: '0' }, { range: 'F2:F' + (n + 1), fmt: qtyFmt },
         { range: 'G2:H' + (n + 1), fmt: money }, { range: 'I2:I' + (n + 1), fmt: money });
@@ -1295,7 +1352,7 @@ window.STATS = (function () {
       spec.values.push([g.item, g.desc, fmtDate(g.dt), g.invoice, g.qty, g.amt, g.cust, g.name, g.rep, g.cost]);
     });
     const n = spec.values.length;
-    const d = spec.values.slice(2);
+    const d = spec.values.slice(1);
     spec.values.push(['Total', '', '', '', d.reduce((s, r) => s + r[4], 0), d.reduce((s, r) => s + r[5], 0), '', '', '', d.reduce((s, r) => s + r[9], 0)]);
     spec.numFmt.push({ range: 'E2:E' + (n + 1), fmt: qtyFmt }, { range: 'F2:F' + (n + 1), fmt: money }, { range: 'J2:J' + (n + 1), fmt: money });
     spec.bold.push(rng(n + 1, 1, n + 1, 10));
@@ -1387,6 +1444,7 @@ window.STATS = (function () {
       salesMap.set(code, { name: String(r.name || '').trim() || code, group: g });
     });
     if (!salesMap.size) return { error: 'NO_SALES1' };
+    if (!(opts.customers || []).length) return { error: 'NO_CUSTOMERS' };
     let latest = '';
     const everPurchased = new Set();
     data.forEach((r) => {
@@ -1486,12 +1544,27 @@ window.STATS = (function () {
   // ============================================================
   // 12) 客户活跃统计 (customerActivity) — 对应原 runCustomerActivityAnalysis（第13段）
   // opts.mode: detail|sales1|city|customertype|sleeping|never|new
+  // 一个维度一张独立 Excel 表（用户要求完全隔离，便于给客户配不同样式）：
+  // 每个模式有自己的工作表名，由 app.js 侧的独立报表项（actDetail/actBySales1/...）分别调用。
+  const ACT_SHEET = {
+    detail: '客户活跃统计', sales1: '活跃-按销售1', city: '活跃-按城市', customertype: '活跃-按客户类型',
+    sleeping: '沉睡客户', never: '从未购买', new: '新开户',
+  };
+  // opts.mode: detail|sales1|city|customertype|sleeping|never|new
   // Active=Start~End 有销售(默认系统近3月)；New=End 月向前3完整月开户；
   // Sleeping=系统近3月无购买；Never=截至系统截止月从未购买。
   // ============================================================
   function customerActivity(data, opts, t) {
     const mode = ['detail', 'sales1', 'city', 'customertype', 'sleeping', 'never', 'new'].includes(opts.mode) ? opts.mode : 'detail';
     const customers = opts.customers || [];
+    // 客户主数据为空：detail 无从构建（只剩标题/口径行），给明确指引而不是空表
+    if (!customers.length) return { error: 'NO_CUSTOMERS' };
+    // 模糊查询（可选）：客户/销售/城市，命中=子串包含（不区分大小写）；不填=全部客户。
+    // 本报表不受起始时间限制：时间窗只用于 Active/Sleeping/New 的状态判定，行集始终是全部客户。
+    const fCust = String(opts.fCust || '').trim().toLowerCase();
+    const fSales = String(opts.fSales || '').trim().toLowerCase();
+    const fCity = String(opts.fCity || '').trim().toLowerCase();
+    const hit = (v, q) => !q || String(v || '').toLowerCase().includes(q);
     const groupMap = sales1Groups(opts.reps || { s1: [], s2: [] });
     const salesMap = new Map();
     (opts.reps && opts.reps.s1 || []).forEach((r) => {
@@ -1511,10 +1584,13 @@ window.STATS = (function () {
     const sysY = Number(latest.slice(0, 4)), sysM = Number(latest.slice(5, 7));
     const monthStart = (y, m, back) => { const d = new Date(y, m - 1 - back, 1); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-01'; };
     const monthEnd = (y, m) => { const d = new Date(y, m, 0); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
-    const systemRecentStart = monthStart(sysY, sysM, 2);
+    // 近期窗口=数据最后月份往前 6 个月（用户口径，考虑数据滞后：以数据内最后日期为基准，非今天）。
+    // 例：数据到 2026-08 → 窗口 2026-03-01 ~ 2026-08-31；Active 默认窗口与 Sleeping 判定都用它。
+    const systemRecentStart = monthStart(sysY, sysM, 5);
     const activeStart = opts.start || systemRecentStart;
     const activeEnd = opts.end || monthEnd(sysY, sysM);
     if (activeStart > activeEnd) return { error: 'BAD_ORDER' };
+    // New=数据最后月份往前 3 个完整月（同样以数据末月为基准）。例：数据到 2026-08 → 2026-06-01 ~ 2026-08-31
     const newEnd = monthEnd(Number(activeEnd.slice(0, 4)), Number(activeEnd.slice(5, 7)));
     const newStart = monthStart(Number(activeEnd.slice(0, 4)), Number(activeEnd.slice(5, 7)), 2);
     const custs = new Map();
@@ -1549,6 +1625,9 @@ window.STATS = (function () {
     const daysBetween = (a, b) => Math.floor((new Date(b) - new Date(a)) / 86400000);
     const detail = [];
     custs.forEach((c) => {
+      if (!hit(c.id, fCust) && !hit(c.name, fCust)) return;
+      if (!hit(c.salesCode, fSales) && !hit(c.sales1, fSales)) return;
+      if (!hit(c.city, fCity)) return;
       const isNever = !c.lastSale;
       const isSleeping = !!(c.lastSale && !c.recentSale);
       const isNew = !!(c.created && c.created >= newStart && c.created <= newEnd);
@@ -1574,7 +1653,7 @@ window.STATS = (function () {
     const statusOrder = { Active: 1, Sleeping: 2, Never: 3, New: 4 };
     const detailRow = (x) => [x.id, x.name, x.sales1, x.city, x.created || '', x.amt, x.orders, x.lastSale || '', x.days, x.status];
     const DETAIL_HEAD = ['No.', 'Customer Name', 'Sales Rep', 'City', 'Since', 'Sales Amount', 'Orders', 'LSD', 'DSLS', 'Status'];
-    const spec = baseSpec('客户活跃统计');
+    const spec = baseSpec(ACT_SHEET[mode] || '客户活跃统计');
     const money = '#,##0.00;-#,##0.00;';
     const pct = '0.0%';
 
@@ -1688,6 +1767,116 @@ window.STATS = (function () {
     return spec;
   }
 
+  // ============================================================
+  // 13) 沉睡客户唤醒统计 (sleepingReactivation) — 原版 Sleeping Customer Reactivation
+  // 不使用时间段；扫描全部历史。同客户可多次唤醒，每次"进入 Sleeping 后再次购买"记一行。
+  // Sleeping Since = 上一次购买日 + 6 个日历月（月末自动钳制：08/31+6月→次年02/28，闰年02/29）
+  // Sleeping Days  = Reactivated Date - Sleeping Since
+  // 同一天多张发票只算一个购买日；Sales 1/2 Code = 唤醒当天 Pull 的历史 Code（非客户表当前值）
+  // Total Orders/Total Sales = 截至数据最新日期的客户历史累计（Orders=唯一发票数+空票行数）
+  // IC / INTERCOMPANY 排除。
+  // ============================================================
+  function sleepingReactivation(data, opts, t) {
+    const customers = opts.customers || [];
+    if (!customers.length) return { error: 'NO_CUSTOMERS' };
+    const normId = (v) => String(v || '').trim().toUpperCase();
+    const salesMap = new Map();
+    (opts.reps && opts.reps.s1 || []).forEach((r) => {
+      const code = String(r.code || '').trim().toUpperCase();
+      if (code) salesMap.set(code, { group: String(r.group || '').trim().toUpperCase() });
+    });
+    let systemEnd = '';
+    data.forEach((r) => { const dt = date(r.soldDate); if (dt && dt > systemEnd) systemEnd = dt; });
+    if (!systemEnd) return { error: 'NO_DATA' };
+
+    // 有效客户宇宙：沿用客户+分组规则，排除 IC / INTERCOMPANY
+    const customerMap = new Map();
+    customers.forEach((c) => {
+      const id = normId(c.no);
+      if (!id) return;
+      const currentSales1 = String(c.sales1 || '').trim().toUpperCase();
+      const customerType = String(c.type || '').trim().toUpperCase();
+      const creationDate = date(c.created);
+      if (currentSales1 === 'IC' || customerType === 'INTERCOMPANY') return;
+      const salesInfo = salesMap.get(currentSales1);
+      if (!salesInfo) return;
+      if (salesInfo.group === 'IC') return;
+      if (creationDate && creationDate > systemEnd) return;
+      customerMap.set(id, { id, name: String(c.name || '').trim(), totalSales: 0, invoiceSet: new Set(), blankInvoiceCount: 0, purchasesByDay: new Map() });
+    });
+
+    // 全历史扫描：累计 Total Orders / Total Sales，并按 客户+购买日 聚合（同日多票=一个购买日）
+    data.forEach((r) => {
+      const soldDate = date(r.soldDate);
+      if (!soldDate || soldDate > systemEnd) return;
+      const c = customerMap.get(normId(r.custNo));
+      if (!c) return;
+      if (!c.name) { const pn = String(r.custName || '').trim(); if (pn) c.name = pn; }
+      const invoice = normId(r.invoice);
+      if (invoice) c.invoiceSet.add(invoice); else c.blankInvoiceCount++;
+      c.totalSales += amount(r.amount);
+      let p = c.purchasesByDay.get(soldDate);
+      if (!p) { p = { date: soldDate, sales1Code: '', sales2Code: '' }; c.purchasesByDay.set(soldDate, p); }
+      if (!p.sales1Code) p.sales1Code = String(r.rep1 || '').trim().toUpperCase();
+      if (!p.sales2Code) p.sales2Code = String(r.rep2 || '').trim().toUpperCase();
+    });
+
+    // 6 个日历月（非 180 天）：日月进位、日钳制到目标月最后一天
+    const addCalendarMonths = (ds, months) => {
+      const parts = ds.split('-');
+      const y = Number(parts[0]), m = Number(parts[1]), d = Number(parts[2]);
+      const total = (m - 1) + months;
+      const ty = y + Math.floor(total / 12);
+      const tm = ((total % 12) + 12) % 12;
+      const lastDay = new Date(ty, tm + 1, 0).getDate();
+      return ty + '-' + String(tm + 1).padStart(2, '0') + '-' + String(Math.min(d, lastDay)).padStart(2, '0');
+    };
+    const dayDiff = (a, b) => Math.round((new Date(b) - new Date(a)) / 86400000);
+
+    const events = [];
+    customerMap.forEach((c) => {
+      const purchases = Array.from(c.purchasesByDay.values()).sort((a, b) => a.date.localeCompare(b.date));
+      if (purchases.length < 2) return;
+      const totalOrders = c.invoiceSet.size + c.blankInvoiceCount;
+      for (let i = 1; i < purchases.length; i++) {
+        const prev = purchases[i - 1], cur = purchases[i];
+        const sleepingSince = addCalendarMonths(prev.date, 6);
+        if (cur.date < sleepingSince) continue;   // 未满 Sleeping 期就回购，不算唤醒
+        events.push({
+          customerNo: c.id, customerName: c.name,
+          sleepingSince, reactivatedDate: cur.date,
+          sleepingDays: Math.max(0, dayDiff(sleepingSince, cur.date)),
+          sales1Code: cur.sales1Code || '', sales2Code: cur.sales2Code || '',
+          totalOrders, totalSales: c.totalSales,
+        });
+      }
+    });
+    // 最近唤醒在前；同日按 Total Sales 高→低；再按客户名
+    events.sort((a, b) => b.reactivatedDate.localeCompare(a.reactivatedDate)
+      || (b.totalSales - a.totalSales)
+      || String(a.customerName || '').localeCompare(String(b.customerName || '')));
+
+    const spec = baseSpec('沉睡客户唤醒统计');
+    const money = '#,##0.00;-#,##0.00;';
+    spec.values.push(['Customer No.', 'Customer Name', 'Sleeping Since', 'Reactivated Date', 'Sleeping Days', 'Sales 1 Code', 'Sales 2 Code', 'Total Orders', 'Total Sales']);
+    events.forEach((e) => {
+      spec.values.push([e.customerNo, e.customerName, e.sleepingSince, e.reactivatedDate, e.sleepingDays, e.sales1Code, e.sales2Code, e.totalOrders, e.totalSales]);
+    });
+    const n = spec.values.length;
+    if (n > 1) {
+      spec.numFmt.push({ range: 'E2:E' + n, fmt: '#,##0;-#,##0;' },
+        { range: 'H2:H' + n, fmt: '#,##0;-#,##0;' },
+        { range: 'I2:I' + n, fmt: money });
+      spec.align = [{ range: 'A2:D' + n, horiz: 'left' }, { range: 'F2:G' + n, horiz: 'left' }];
+    }
+    spec.freeze = { rows: 1, cols: 0 };
+    spec.bold.push(rng(1, 1, 1, 9));
+    spec.bg.push({ range: rng(1, 1, 1, 9), color: '#d9eaf7' });
+    spec.widths = [[1, 110], [2, 240], [3, 130], [4, 140], [5, 120], [6, 110], [7, 110], [8, 110], [9, 150]];
+    spec.info = 'Sleeping Customer Reactivation | Scans full history (not limited by period) | ' + (n - 1) + ' events';
+    return spec;
+  }
+
   // 列号 1 基 → 字母（numFmt 范围用）
   function colL(n) {
     let s = '';
@@ -1695,16 +1884,25 @@ window.STATS = (function () {
     return s;
   }
 
+  // 客户活跃统计拆分：一个维度一个报表（各自独立 Excel 工作表），mode 由报表项固定
+  const actMode = (m) => (data, opts, t) => customerActivity(data, Object.assign({}, opts, { mode: m }), t);
+
   return {
     annual, salesPerformance, customerOrders, categoryQuery,
     customerStats, cabinetColors, stoneSales, customerDashboardData,
     salesHistory, customerType, salesAccount, customerActivity,
+    actDetail: actMode('detail'), actBySales1: actMode('sales1'), actByCity: actMode('city'),
+    actByType: actMode('customertype'), actSleeping: actMode('sleeping'), actNever: actMode('never'), actNew: actMode('new'),
+    sleepingReactivation, actReact: sleepingReactivation,
     // 报表ID → 专属工作表名（与 baseSpec 名一一对应）：未生成时也用这个名字铺空表，保证菜单=表格一一对应
     sheetNames: {
       annual: '年度销售总表', salesPerformance: '销售业绩', customerOrders: '客户订单统计',
       categoryQuery: '销售查询', customerStats: '客户统计', cabinetColors: '橱柜颜色统计',
       stoneSales: '石材销量统计', salesHistory: '销售历史查询', customerType: '客户类型统计',
       salesAccount: '客户开户统计', customerActivity: '客户活跃统计',
+      actDetail: ACT_SHEET.detail, actBySales1: ACT_SHEET.sales1, actByCity: ACT_SHEET.city,
+      actByType: ACT_SHEET.customertype, actSleeping: ACT_SHEET.sleeping, actNever: ACT_SHEET.never, actNew: ACT_SHEET.new,
+      actReact: '沉睡客户唤醒统计',
     },
     helpers: { date, amount, range, inRange, sales1Groups, isIC, normType, isCabinetType },
   };
