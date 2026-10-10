@@ -686,7 +686,7 @@ window.STATS = (function () {
     spec.align.push({ range: rng(1, 1, 2, totalCols), horiz: 'center' });
     // 数据区对齐：金额表右齐，数量表居中（D列起所有数字列）
     spec.align.push({ range: 'D3:' + colLetter(totalCols) + totalRowNo, horiz: mode === 'qty' ? 'center' : 'right' });
-    // 列宽写死（用户截图要求）：A=100, B=100, C=200, D-H(合计/年/TTM)=120, I起月列=100
+    // 列宽写死（用户要求）：A=100, B=100, C=200, D-H(合计/年/TTM)=120, I起月列=100
     spec.widths = [[1, 100], [2, 100], [3, 200], [4, 120]];
     for (let c = yearStartCol; c <= ytdCol; c++) spec.widths.push([c, 120]);
     for (let c = monthStartCol; c <= totalCols; c++) spec.widths.push([c, 100]);
