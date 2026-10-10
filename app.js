@@ -407,12 +407,25 @@
   }
 
   // 统一调用：python 侧返回 JSON 字符串时自动解析
+  // 远程版：pywebview 不可用时走 HTTP POST /api/<method>
   async function api(method) {
-    const r = await BRIDGE[method].apply(BRIDGE, Array.prototype.slice.call(arguments, 1));
-    if (typeof r === 'string') {
-      try { return JSON.parse(r); } catch (e) { return r; }
+    var args = Array.prototype.slice.call(arguments, 1);
+    // 如果桥接有该方法，走桥接（pywebview 本地版）
+    if (BRIDGE && BRIDGE[method]) {
+      const r = await BRIDGE[method].apply(BRIDGE, args);
+      if (typeof r === 'string') {
+        try { return JSON.parse(r); } catch (e) { return r; }
+      }
+      return r;
     }
-    return r;
+    // 否则走 HTTP（远程版）
+    const resp = await fetch('/api/' + method, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(args[0] || {}),
+    });
+    const text = await resp.text();
+    try { return JSON.parse(text); } catch (e) { return text; }
   }
 
   // ================= state =================
