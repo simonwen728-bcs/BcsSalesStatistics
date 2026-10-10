@@ -435,7 +435,11 @@
     try {
       const nav = S.nav || '';
       const id = nav.startsWith('r:') ? nav.slice(2) : nav;
-      return NO_STYLE_SAVE.has(id);
+      if (NO_STYLE_SAVE.has(id)) return true;
+      // 兜底：检查当前渲染的表名
+      const sheet = S.lastRenderedSheet || '';
+      if (sheet && /分类|category/i.test(sheet)) return true;
+      return false;
     } catch (e) { return false; }
   }
 
@@ -1235,9 +1239,15 @@
       const u = unitW(row[c]);
       if (u > colUnits[c]) colUnits[c] = u;
     }
+    // 写死列宽：写死格式的报表（NO_STYLE_SAVE）直接用 spec.widths，不走自适应
+    const hardW = {};
+    if (skipStyleSave() && Array.isArray(spec.widths)) spec.widths.forEach(([col, w0]) => {
+      const ci = Number(col) - 1, ww = Number(w0);
+      if (ci >= 0 && ci < nc && ww >= 40) hardW[ci] = ww;
+    });
     const finalWidths = [];
     for (let c = 0; c < nc; c++) {
-      const w = Math.max(56, Math.min(420, Math.round(colUnits[c] * 8.4 * 1.25) + 26));
+      const w = (c in hardW) ? hardW[c] : Math.max(56, Math.min(420, Math.round(colUnits[c] * 8.4 * 1.25) + 26));
       try { sh.setColumnWidth(c, w); } catch (e) { /* ignore */ }
       finalWidths.push(w);
     }
