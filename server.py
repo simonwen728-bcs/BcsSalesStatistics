@@ -727,6 +727,14 @@ class Api:
             return ""
         return "" if v is None else str(v)
 
+    @staticmethod
+    def _clean_date(v):
+        # Google Sheets may return ISO datetime like 2024-08-01T00:00:00.000Z; keep only YYYY-MM-DD
+        s = (v or "").strip()
+        if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+            return s[:10]
+        return s
+
     def sync_master_from_sheets(self):
         """从 Google Sheets 同步主数据:Customer -> customers, StoneStock -> stock, Group -> reps。"""
         payload = {"customers": [], "stock": [], "reps": []}
@@ -744,7 +752,7 @@ class Api:
                 "city": self._cell(r, 7), "state": self._cell(r, 8),
                 "phone": phone, "contact": self._cell(r, 11),
                 "type": self._cell(r, 15), "email": self._cell(r, 16),
-                "sales1": self._cell(r, 3), "created": self._cell(r, 12),
+                "sales1": self._cell(r, 3), "created": self._clean_date(self._cell(r, 12)),
             })
         # --- StoneStock ---
         data, err = self._fetch_sheet("StoneStock")
