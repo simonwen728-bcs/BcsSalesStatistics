@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: bcs-sales-stats
+    env: python
+    buildCommand: ""
+    startCommand: "python server.py --no-browser"
+    disk:
+      name: bcs-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
