@@ -206,6 +206,15 @@ class Api:
             where.append("invoice LIKE ?"); params.append("%" + f["invoice"] + "%")
         if f.get("type"):
             where.append("type = ?"); params.append(f["type"])
+        # 前端会传这些条件，之前服务端静默忽略（描述/客户名/颜色/业务员筛选不起作用）
+        if f.get("custName"):
+            where.append("cust_name LIKE ?"); params.append("%" + f["custName"] + "%")
+        if f.get("description"):
+            where.append("description LIKE ?"); params.append("%" + f["description"] + "%")
+        if f.get("color"):
+            where.append("color LIKE ?"); params.append("%" + f["color"] + "%")
+        if f.get("rep1"):
+            where.append("rep1 LIKE ?"); params.append("%" + f["rep1"] + "%")
         w = ("WHERE " + " AND ".join(where)) if where else ""
         with DB_LOCK:
             con = connect()
@@ -379,6 +388,34 @@ class Api:
                 con.close()
         return {"items": items, "customers": customers, "invoices": invoices,
                 "types": types, "colors": colors}
+
+    def search_invoices(self, q=""):
+        # 发票号模糊搜索走服务端：get_lookup_data 的发票列表 LIMIT 5000 会截掉老发票
+        q = (q or "").strip()
+        with DB_LOCK:
+            con = connect()
+            try:
+                like = "%" + q + "%"
+                rows = con.execute(
+                    "SELECT DISTINCT invoice FROM sales WHERE invoice LIKE ? ORDER BY invoice DESC LIMIT 20",
+                    (like,)).fetchall()
+            finally:
+                con.close()
+        return [r[0] for r in rows]
+
+    def search_descs(self, q=""):
+        # 描述模糊搜索走服务端：lookup 里没有描述数据
+        q = (q or "").strip()
+        with DB_LOCK:
+            con = connect()
+            try:
+                like = "%" + q + "%"
+                rows = con.execute(
+                    "SELECT DISTINCT description FROM sales WHERE description LIKE ? ORDER BY description LIMIT 20",
+                    (like,)).fetchall()
+            finally:
+                con.close()
+        return [r[0] for r in rows if r[0]]
 
     # ---- 客户 ----
     def get_all_customers(self, query=""):
