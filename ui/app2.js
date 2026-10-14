@@ -520,33 +520,39 @@
   const cap20 = (list) => list.slice(0, 20);
 
   // 销售历史查询等精确条件：回填编码（label 显示名称便于辨认）
+  // 后端 customers 字段是 no（不是 code），兼容两种写法
+  const custNo = (c) => c.no || c.code || '';
   async function fuzzyCustomersCode(text) {
     const lk = await getLookup();
-    return cap20(lk.customers.filter((c) => fuzzyHit(text, c.code, c.name))
-      .map((c) => ({ v: c.code, label: c.name, sub: c.code })));
+    return cap20(lk.customers.filter((c) => fuzzyHit(text, custNo(c), c.name))
+      .map((c) => ({ v: custNo(c), label: c.name, sub: custNo(c) })));
   }
   // 本地主数据来源
   async function fuzzyCustomers(text) {
     const lk = await getLookup();
-    return cap20(lk.customers.filter((c) => fuzzyHit(text, c.code, c.name))
-      .map((c) => ({ v: c.name, label: c.name, sub: c.code, data: { no: c.code } })));
+    return cap20(lk.customers.filter((c) => fuzzyHit(text, custNo(c), c.name))
+      .map((c) => ({ v: c.name, label: c.name, sub: custNo(c), data: { no: custNo(c) } })));
   }
+  // 后端 items 是纯字符串数组（不是 {code,name} 对象）
   async function fuzzyItems(text) {
     const lk = await getLookup();
-    return cap20(lk.items.filter((c) => fuzzyHit(text, c.code, c.name))
-      .map((c) => ({ v: c.code, label: c.code, sub: c.name })));
+    const norm = (c) => (typeof c === 'string' ? { code: c, name: '' } : c);
+    return cap20(lk.items.filter((c) => { const n = norm(c); return fuzzyHit(text, n.code, n.name); })
+      .map((c) => { const n = norm(c); return { v: n.code, label: n.code, sub: n.name }; }));
   }
+  // 发票号走服务端实时搜索：lookup 只缓存最新 5000 张，老发票会被 LIMIT 截掉
+  async function fuzzyInvoices(text) {
+    try {
+      const list = await api('search_invoices', text);
+      return cap20((Array.isArray(list) ? list : []).map((v) => ({ v, label: v })));
+    } catch (e) { return []; }
+  }
+  // 描述模糊搜索走服务端：lookup 里没有描述数据
   async function fuzzyDescs(text) {
-    const lk = await getLookup();
-    const seen = new Set();
-    const out = [];
-    lk.items.forEach((c) => {
-      if (!c.name || seen.has(c.name)) return;
-      if (!fuzzyHit(text, c.code, c.name)) return;
-      seen.add(c.name);
-      out.push({ v: c.name, label: c.name, sub: c.code });
-    });
-    return cap20(out);
+    try {
+      const list = await api('search_descs', text);
+      return cap20((Array.isArray(list) ? list : []).map((v) => ({ v, label: v })));
+    } catch (e) { return []; }
   }
   async function fuzzySimple(list, text) {
     return cap20(list.filter((v) => fuzzyHit(text, v)).map((v) => ({ v, label: v })));
@@ -1371,7 +1377,7 @@
         } else if (f.fuzzy === 'items') {
           attachFuzzy(input, { fetch: fuzzyItems });
         } else if (f.fuzzy === 'invoices') {
-          attachFuzzy(input, { fetch: (text) => getLookup().then((lk) => fuzzySimple(lk.invoices, text)) });
+          attachFuzzy(input, { fetch: fuzzyInvoices });
         }
       }
     });
@@ -2412,7 +2418,7 @@
     attachFuzzy($('#f-desc'), { fetch: fuzzyDescs });
     attachFuzzy($('#f-type'), { fetch: (text) => getLookup().then((lk) => fuzzySimple(lk.types, text)) });
     attachFuzzy($('#f-color'), { fetch: (text) => getLookup().then((lk) => fuzzySimple(lk.colors, text)) });
-    attachFuzzy($('#f-inv'), { fetch: (text) => getLookup().then((lk) => fuzzySimple(lk.invoices, text)) });
+    attachFuzzy($('#f-inv'), { fetch: fuzzyInvoices });
     attachFuzzy($('#f-rep1'), { fetch: fuzzyRep1 });
   }
   function bindToolbars() {
