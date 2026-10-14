@@ -1363,8 +1363,9 @@
   async function statOptionFields(def) {
     const fields = [];
     if (def.fields.includes('range')) {
-      // 默认 TTM（滚动12个月）；「重置」=不限时段即全部数据
-      const r = ttmRange();
+      // 销售历史查询默认全部时间（Start/End 留空）；其他报表默认 TTM（滚动12个月）
+      const allTime = def.fields.includes('salesHistory');
+      const r = allTime ? { start: '', end: '' } : ttmRange();
       fields.push({ key: 'start', label: t('dlgStart'), type: 'date', value: r.start });
       fields.push({ key: 'end', label: t('dlgEnd'), type: 'date', value: r.end });
     }
