@@ -1500,13 +1500,39 @@
   async function exportStatResult(def) {
     const spec = S.statResults[def.id];
     if (!spec || !spec.values || !spec.values.length) { toast(t('exportEmpty')); return; }
+    // 先走后端接口（本地 exe 版桥接实现）；远程版后端无此接口，失败后走浏览器本地导出
     try {
       const res = await api('export_sheet_xlsx', JSON.stringify({ name: spec.sheet, values: spec.values }));
-      if (res && res.ok) toast(tf('exportDone', { p: res.path }));
-      else toast(tf('exportFail', { e: (res && res.error) || '' }));
+      if (res && res.ok) { toast(tf('exportDone', { p: res.path })); return; }
+    } catch (e) { /* 忽略，走下面本地导出 */ }
+    // 浏览器本地导出（远程版）：SheetJS 在页面内生成 xlsx 并下载
+    try {
+      await ensureXlsxLib();
+      const ws = XLSX.utils.aoa_to_sheet(spec.values);
+      const wb = XLSX.utils.book_new();
+      const sheetName = String(spec.sheet || 'Sheet').replace(/[\\/?*[\]:]/g, '').slice(0, 31) || 'Sheet';
+      XLSX.utils.book_append_sheet(wb, ws, sheetName);
+      const fileName = sheetName + '.xlsx';
+      XLSX.writeFile(wb, fileName);
+      toast(tf('exportDone', { p: fileName }));
     } catch (e) {
       toast(tf('exportFail', { e: e.message || e }));
     }
+  }
+
+  // 懒加载 SheetJS（xlsx.full.min.js 与 app.js 同目录），只在导出时加载一次
+  let _xlsxLibPromise = null;
+  function ensureXlsxLib() {
+    if (typeof XLSX !== 'undefined') return Promise.resolve();
+    if (_xlsxLibPromise) return _xlsxLibPromise;
+    _xlsxLibPromise = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'xlsx.full.min.js';
+      s.onload = () => resolve();
+      s.onerror = () => reject(new Error('xlsx lib load failed'));
+      document.head.appendChild(s);
+    });
+    return _xlsxLibPromise;
   }
 
   let statCardToken = 0;   // 快速连续切换菜单时，只让最后一次的渲染生效
