@@ -2696,9 +2696,241 @@
     return recs;
   }
 
+  // ================= 网页版文件导入/备份（远程版） =================
+  // exe 版后端提供原生文件对话框（import_*_file / export_backup / backup_restore），
+  // 远程版 HTTP 后端没有这些方法；先调 api()（exe 版 / 演示模式走原生对话框或 MOCK 数据），
+  // 后端报 unknown method 时再走浏览器本地选文件 + SheetJS 解析，返回与后端一致的形状，
+  // 下游流程（parseSalesRows / apply_*_import）不用改。
+  // 解析逻辑与 ui/webimport.js 同源；内联于此，避免依赖 index.html 另行加载它。
+  async function importFileWithFallback(apiMethod, pickAndParse) {
+    let res = null;
+    try { res = await api(apiMethod); } catch (e) { res = null; }
+    if (res && res.ok) return res;
+    // 取消 / 读取错误等：按原流程提示，不再弹第二次选文件框
+    if (res && res.error && !/unknown method/i.test(String(res.error))) return res;
+    return pickAndParse();
+  }
+
+  function webImportNormHeader(h) {
+    return String(h == null ? '' : h).toLowerCase().replace(/[\s_\-]+/g, '');
+  }
+
+  function webImportPickFiles(accept, multiple) {
+    return new Promise((resolve) => {
+      const inp = document.createElement('input');
+      inp.type = 'file';
+      inp.accept = accept || '.xlsx,.xls,.csv';
+      inp.multiple = !!multiple;
+      inp.onchange = () => resolve(Array.from(inp.files || []));
+      // 用户取消选择时也 resolve，避免永远挂起
+      inp.addEventListener('cancel', () => resolve([]));
+      setTimeout(() => resolve([]), 120000); // 2 分钟兜底
+      inp.click();
+    });
+  }
+
+  function webImportReadWorkbook(file) {
+    return new Promise((resolve, reject) => {
+      const rd = new FileReader();
+      rd.onload = (e) => {
+        try {
+          const wb = XLSX.read(e.target.result, { type: 'array', cellDates: true });
+          resolve(wb);
+        } catch (err) { reject(err); }
+      };
+      rd.onerror = () => reject(rd.error || new Error('read error'));
+      rd.readAsArrayBuffer(file);
+    });
+  }
+
+  function webImportSheetToHeadersRows(ws) {
+    // header:1 取原始二维数组；第一行非空的作为表头
+    const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: true });
+    if (!aoa.length) return { headers: [], rows: [] };
+    let hi = 0;
+    while (hi < aoa.length && aoa[hi].every((v) => v === '' || v === null || v === undefined)) hi++;
+    if (hi >= aoa.length) return { headers: [], rows: [] };
+    const headers = aoa[hi].map((v) => String(v == null ? '' : v).trim());
+    const rows = aoa.slice(hi + 1).map((r) =>
+      headers.map((_, ci) => {
+        const v = r[ci];
+        if (v instanceof Date) {
+          // 日期转 YYYY-MM-DD 文本，保持与原 Python 行为一致
+          const m = String(v.getMonth() + 1).padStart(2, '0'), d = String(v.getDate()).padStart(2, '0');
+          return v.getFullYear() + '-' + m + '-' + d;
+        }
+        return v === null || v === undefined ? '' : v;
+      })
+    );
+    return { headers, rows };
+  }
+
+  async function webImportReadSalesFiles(files) {
+    const out = { ok: true, files: [] };
+    for (const f of files) {
+      try {
+        const wb = await webImportReadWorkbook(f);
+        // 销售文件取第一张表
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const hr = webImportSheetToHeadersRows(ws);
+        out.files.push({ fileName: f.name, headers: hr.headers, rows: hr.rows, ok: true });
+      } catch (e) {
+        out.files.push({ fileName: f.name, ok: false, error: String((e && e.message) || e) });
+      }
+    }
+    return out;
+  }
+
+  // 表头映射：客户 / 库存 / 销售员
+  const WEBIMPORT_CUST_MAP = {
+    no: 'no', customerno: 'no', customerid: 'no', 客户编号: 'no', 客户号: 'no',
+    name: 'name', customername: 'name', 客户名称: 'name',
+    city: 'city', 城市: 'city',
+    state: 'state', 州: 'state', 省: 'state',
+    phone: 'phone', 电话: 'phone',
+    contact: 'contact', 联系人: 'contact',
+    type: 'type', customertype: 'type', 客户类型: 'type',
+    email: 'email', 邮箱: 'email',
+    sales1: 'sales1', rep1: 'sales1', 销售1: 'sales1', 销售员: 'sales1',
+    created: 'created', creationdate: 'created', 开户日期: 'created', 创建日期: 'created',
+  };
+  const WEBIMPORT_STOCK_MAP = {
+    itemno: 'itemNo', item: 'itemNo', 品名: 'itemNo',
+    description: 'description', 描述: 'description',
+    available: 'available', availableqty: 'available', 库存: 'available',
+    intransit: 'inTransit', intransitqty: 'inTransit', 在途: 'inTransit',
+  };
+  const WEBIMPORT_REP_MAP = {
+    code: 'code', repcode: 'code', 销售代码: 'code', 代码: 'code',
+    name: 'name', repname: 'name', 姓名: 'name', 名称: 'name',
+    group: 'group', 部门: 'group', 分组: 'group',
+  };
+
+  function webImportMapRows(headers, rows, hmap, numKeys) {
+    const keys = headers.map((h) => hmap[webImportNormHeader(h)] || hmap[String(h).trim()] || null);
+    const recs = [];
+    rows.forEach((arr) => {
+      if (!arr || arr.every((v) => v === '' || v === null || v === undefined)) return;
+      const rec = {};
+      arr.forEach((v, ci) => {
+        const k = keys[ci];
+        if (!k) return;
+        if ((numKeys || []).includes(k)) {
+          const n = Number(String(v).replace(/[$,]/g, ''));
+          rec[k] = isNaN(n) ? 0 : n;
+        } else {
+          rec[k] = String(v === null || v === undefined ? '' : v).trim();
+        }
+      });
+      recs.push(rec);
+    });
+    return recs;
+  }
+
+  function webImportFindSheet(wb, names) {
+    const lower = wb.SheetNames.map((s) => String(s).toLowerCase());
+    for (const n of names) {
+      const i = lower.findIndex((s) => s.indexOf(n) >= 0);
+      if (i >= 0) return wb.Sheets[wb.SheetNames[i]];
+    }
+    return null;
+  }
+
+  async function webImportReadMasterFile(file) {
+    if (!file) return { ok: false, error: 'cancelled' };
+    const wb = await webImportReadWorkbook(file);
+    const out = { ok: true, customers: [], stock: [], reps: { s1: [], s2: [] } };
+    // 客户表
+    let ws = webImportFindSheet(wb, ['customer', '客户']) || wb.Sheets[wb.SheetNames[0]];
+    let hr = webImportSheetToHeadersRows(ws);
+    out.customers = webImportMapRows(hr.headers, hr.rows, WEBIMPORT_CUST_MAP);
+    // 库存表
+    ws = webImportFindSheet(wb, ['stock', 'stone', '库存']);
+    if (ws) { hr = webImportSheetToHeadersRows(ws); out.stock = webImportMapRows(hr.headers, hr.rows, WEBIMPORT_STOCK_MAP, ['available', 'inTransit']); }
+    // 销售员表(s1/s2)
+    const s1ws = webImportFindSheet(wb, ['sales1', 'rep1', '销售1']);
+    const s2ws = webImportFindSheet(wb, ['sales2', 'rep2', '销售2']);
+    if (s1ws) { hr = webImportSheetToHeadersRows(s1ws); out.reps.s1 = webImportMapRows(hr.headers, hr.rows, WEBIMPORT_REP_MAP).map((r) => ({ kind: 's1', ...r })); }
+    if (s2ws) { hr = webImportSheetToHeadersRows(s2ws); out.reps.s2 = webImportMapRows(hr.headers, hr.rows, WEBIMPORT_REP_MAP).map((r) => ({ kind: 's2', ...r })); }
+    return out;
+  }
+
+  async function webImportReadCustomersFile(file) {
+    if (!file) return { ok: false, error: 'cancelled' };
+    const wb = await webImportReadWorkbook(file);
+    const hr = webImportSheetToHeadersRows(wb.Sheets[wb.SheetNames[0]]);
+    return { ok: true, customers: webImportMapRows(hr.headers, hr.rows, WEBIMPORT_CUST_MAP) };
+  }
+
+  async function webImportReadStockFile(file) {
+    if (!file) return { ok: false, error: 'cancelled' };
+    const wb = await webImportReadWorkbook(file);
+    const hr = webImportSheetToHeadersRows(wb.Sheets[wb.SheetNames[0]]);
+    return { ok: true, stock: webImportMapRows(hr.headers, hr.rows, WEBIMPORT_STOCK_MAP, ['available', 'inTransit']) };
+  }
+
+  async function webImportPickAndParseSales() {
+    await ensureXlsxLib();
+    const files = await webImportPickFiles('.xlsx,.xls,.csv', true);
+    if (!files.length) return { ok: false, error: 'cancelled' };
+    return webImportReadSalesFiles(files);
+  }
+
+  async function webImportPickAndParseMaster() {
+    await ensureXlsxLib();
+    const files = await webImportPickFiles('.xlsx,.xls,.csv', false);
+    if (!files.length) return { ok: false, error: 'cancelled' };
+    return webImportReadMasterFile(files[0]);
+  }
+
+  async function webImportPickAndParseCustomers() {
+    await ensureXlsxLib();
+    const files = await webImportPickFiles('.xlsx,.xls,.csv', false);
+    if (!files.length) return { ok: false, error: 'cancelled' };
+    return webImportReadCustomersFile(files[0]);
+  }
+
+  async function webImportPickAndParseStock() {
+    await ensureXlsxLib();
+    const files = await webImportPickFiles('.xlsx,.xls,.csv', false);
+    if (!files.length) return { ok: false, error: 'cancelled' };
+    return webImportReadStockFile(files[0]);
+  }
+
+  // 备份：下载整库 / 上传整库（后端 /api/backup_download、/api/backup_upload 已实现）
+  function webImportDownloadBackup() {
+    const a = document.createElement('a');
+    a.href = '/api/backup_download';
+    a.download = '';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => a.remove(), 1000);
+  }
+
+  function webImportPickBackupFile() {
+    return new Promise((resolve) => {
+      const inp = document.createElement('input');
+      inp.type = 'file';
+      inp.accept = '.db';
+      inp.onchange = () => resolve((inp.files && inp.files[0]) || null);
+      inp.addEventListener('cancel', () => resolve(null));
+      inp.click();
+    });
+  }
+
+  async function webImportUploadBackupFile(file) {
+    const buf = await file.arrayBuffer();
+    const resp = await fetch('/api/backup_upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: buf,
+    });
+    return resp.json();
+  }
+
   async function importSalesFlow() {
     let res;
-    try { res = await api('import_sales_files'); } catch (e) { toast('Import error: ' + e); return; }
+    try { res = await importFileWithFallback('import_sales_files', webImportPickAndParseSales); } catch (e) { toast('Import error: ' + e); return; }
     if (!res || !res.ok) { toast((res && res.error) || 'Import cancelled'); return; }
     // 按月聚合：优先取每条记录销售日期的月份，取不到时回退文件名里的 YYYYMM
     const months = {};   // month → {records, file}
@@ -2768,7 +3000,7 @@
 
   async function importMasterFlow() {
     let res;
-    try { res = await api('import_master_file'); } catch (e) { toast('Import error: ' + e); return; }
+    try { res = await importFileWithFallback('import_master_file', webImportPickAndParseMaster); } catch (e) { toast('Import error: ' + e); return; }
     if (!res || !res.ok) { toast((res && res.error) || 'Import cancelled'); return; }
     const ok = await confirmModal(tf('masterDone', {
       c: (res.customers || []).length,
@@ -2785,7 +3017,7 @@
   // 客户/库存单文件导入（表头自动识别）
   async function importCustomersFlow() {
     let res;
-    try { res = await api('import_customers_file'); } catch (e) { toast('Import error: ' + e); return; }
+    try { res = await importFileWithFallback('import_customers_file', webImportPickAndParseCustomers); } catch (e) { toast('Import error: ' + e); return; }
     if (!res || !res.ok) { toast((res && res.error) || 'Import cancelled'); return; }
     const list = res.customers || [];
     if (!list.length) { toast(t('noDataShort')); return; }
@@ -2800,7 +3032,7 @@
 
   async function importStockFlow() {
     let res;
-    try { res = await api('import_stock_file'); } catch (e) { toast('Import error: ' + e); return; }
+    try { res = await importFileWithFallback('import_stock_file', webImportPickAndParseStock); } catch (e) { toast('Import error: ' + e); return; }
     if (!res || !res.ok) { toast((res && res.error) || 'Import cancelled'); return; }
     const list = res.stock || [];
     if (!list.length) { toast(t('noDataShort')); return; }
@@ -2853,9 +3085,19 @@
           close();
           try {
             const res = await api('export_backup', JSON.stringify(opts));
-            if (res && res.ok) toast(tf('backupDone', { p: res.path }));
-            else toast(res && res.error ? 'Export failed: ' + res.error : 'Cancelled');
-          } catch (e) { toast(tf('backupFail', { e })); }
+            if (res && res.ok) { toast(tf('backupDone', { p: res.path })); return; }
+            if (res && res.error && !/unknown method/i.test(String(res.error))) {
+              toast('Export failed: ' + res.error); return;
+            }
+            // 远程版后端无 export_backup：直接下载整库文件（/api/backup_download）。
+            // 注意：远程版备份统一为整库下载，月份筛选选项暂不生效。
+            webImportDownloadBackup();
+            toast(tf('backupDone', { p: 'bcs_backup.db' }));
+          } catch (e) {
+            // 网络异常等：同样走下载兜底（下载不经过 api()）
+            webImportDownloadBackup();
+            toast(tf('backupDone', { p: 'bcs_backup.db' }));
+          }
         },
       },
     ]);
@@ -2872,6 +3114,28 @@
     try { info = await api('backup_inspect'); } catch (e) { toast('Restore error: ' + e); return; }
     if (!info || !info.ok) {
       if (info && info.error && info.error !== 'cancelled') toast(tf('restoreBad', { e: info.error }));
+      return;
+    }
+    // 远程版：后端 backup_inspect 返回整库统计（无快照文件信息），走备份文件上传恢复；
+    // exe 版返回快照信息（含 months），走下面原流程。
+    if (!Array.isArray(info.months)) {
+      const file = await webImportPickBackupFile();
+      if (!file) return;
+      const ok = await confirmModal(t('bkRestoreTitle') + '：' + file.name + ' ？', t('bkExecute'));
+      if (!ok) return;
+      let up;
+      try { up = await webImportUploadBackupFile(file); } catch (e) { toast('Restore failed: ' + e); return; }
+      if (!up || !up.ok) { toast('Restore failed: ' + ((up && up.error) || '')); return; }
+      // 还原后刷新：与原 replace 分支一致，并清空查询缓存
+      LOOKUP = null;
+      REPS_CACHE = null;
+      const meta = await api('get_meta');
+      LANG = meta.lang === 'zh' ? 'zh' : 'en';
+      applyI18n();
+      await invalidateStatOutputs();
+      navigate('sales');
+      toast(t('restoreDone'));
+      saved();
       return;
     }
     const zh = LANG === 'zh';
