@@ -384,10 +384,13 @@ class Api:
                     "SELECT DISTINCT type FROM sales WHERE type<>'' ORDER BY type")]
                 colors = [r[0] for r in con.execute(
                     "SELECT DISTINCT color FROM sales WHERE color<>'' ORDER BY color")]
+                # 城市下拉（前端 fCity 模糊用 lk.cities）：之前漏返回，城市联想恒为空
+                cities = [r[0] for r in con.execute(
+                    "SELECT DISTINCT city FROM customers WHERE city<>'' ORDER BY city")]
             finally:
                 con.close()
         return {"items": items, "customers": customers, "invoices": invoices,
-                "types": types, "colors": colors}
+                "types": types, "colors": colors, "cities": cities}
 
     def search_invoices(self, q=""):
         # 发票号模糊搜索走服务端：get_lookup_data 的发票列表 LIMIT 5000 会截掉老发票
@@ -589,7 +592,18 @@ class Api:
                         in_transit=excluded.in_transit""",
                         (item_no, s.get("description") or "",
                          _num(s.get("available")), _num(s.get("inTransit") or s.get("in_transit"))))
-                for r in (p.get("reps") or []):
+                # reps 两种形状都接受：同步路径传扁平列表 [{kind,code,...}]，
+                # 前端主数据导入/演示数据传 {s1:[...], s2:[...]}；字典形状先展平成列表
+                reps_in = p.get("reps") or []
+                if isinstance(reps_in, dict):
+                    flat = []
+                    for _kind in ("s1", "s2"):
+                        for _r in (reps_in.get(_kind) or []):
+                            _rr = dict(_r) if isinstance(_r, dict) else {}
+                            _rr.setdefault("kind", _kind)
+                            flat.append(_rr)
+                    reps_in = flat
+                for r in reps_in:
                     kind = "s1" if (r.get("kind") or "s1") == "s1" else "s2"
                     code = (r.get("code") or "").strip().upper()
                     if not code:
@@ -616,16 +630,49 @@ class Api:
         return {"ok": True}
 
     def initialize_data(self):
-        """首次运行:建表并检查;如库为空则保持空(用户自行导入)。"""
+        """初始化:补全销售2 / 补齐销售分组 / 刷新查询数据源。
+        与前端 initializeFlow 对齐，返回 {sales2Filled, newS1, newS2}（之前只返回 counts，初始化实际没做）。"""
         init_db()
         with DB_LOCK:
             con = connect()
             try:
                 counts = {t: con.execute("SELECT COUNT(*) FROM " + t).fetchone()[0]
                           for t in ("sales", "customers", "stock", "reps", "batches")}
+                # 补销售2：rep2 为空且 rep1 有值时，rep2=rep1，并补 rep2_name
+                cur = con.execute(
+                    "UPDATE sales SET rep2=rep1, "
+                    "rep2_name=COALESCE(NULLIF(rep2_name,''), NULLIF(rep1_name,''), 'Ex Sales Rep') "
+                    "WHERE (rep2 IS NULL OR rep2='') AND rep1<>''")
+                filled = cur.rowcount or 0
+                # 补 rep2_name：rep2 有值但 rep2_name 为空时取 rep1_name，仍空则 'Ex Sales Rep'
+                con.execute(
+                    "UPDATE sales SET rep2_name=COALESCE(NULLIF(rep1_name,''), 'Ex Sales Rep') "
+                    "WHERE rep2<>'' AND (rep2_name IS NULL OR rep2_name='')")
+                # 补齐销售分组：销售记录里出现过的 code，reps 表没有则补入（后出现的同名覆盖先出现的，与 exe 逻辑一致）
+                have_s1 = {r[0] for r in con.execute("SELECT UPPER(code) FROM reps WHERE kind='s1'")}
+                have_s2 = {r[0] for r in con.execute("SELECT UPPER(code) FROM reps WHERE kind='s2'")}
+                uniq = {}
+                for code, name in con.execute(
+                        "SELECT rep1, rep1_name FROM sales WHERE rep1<>'' ORDER BY id"):
+                    uniq[code.strip().upper()] = (name or "").strip() or code.strip().upper()
+                for code, name in con.execute(
+                        "SELECT rep2, rep2_name FROM sales WHERE rep2<>'' ORDER BY id"):
+                    uniq[code.strip().upper()] = (name or "").strip() or code.strip().upper()
+                new_s1, new_s2 = [], []
+                for code in sorted(uniq):
+                    if code not in have_s1:
+                        con.execute("INSERT OR IGNORE INTO reps (kind,code,name,group_) VALUES ('s1',?,?,?)",
+                                    (code, uniq[code], ""))
+                        new_s1.append(code)
+                    if code not in have_s2:
+                        con.execute("INSERT OR IGNORE INTO reps (kind,code,name,group_) VALUES ('s2',?,?,?)",
+                                    (code, uniq[code], ""))
+                        new_s2.append(code)
+                con.commit()
             finally:
                 con.close()
-        return {"ok": True, "counts": counts, "dbPath": DB_PATH}
+        return {"ok": True, "sales2Filled": filled, "newS1": new_s1, "newS2": new_s2,
+                "counts": counts}
 
     # ---- meta / prefs ----
     def get_meta(self):
@@ -665,6 +712,10 @@ class Api:
         prefs = prefs_load()
         prefs["lang"] = lang
         prefs_save(prefs)
+        return {"ok": True}
+
+    def close_app(self):
+        # 网页版由浏览器关闭页面；接口保留兼容（exe 版真正退出），前端退出时调用
         return {"ok": True}
 
     # ---- 备份 ----
