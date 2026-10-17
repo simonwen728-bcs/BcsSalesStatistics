@@ -853,57 +853,61 @@ class Api:
                 continue
         return s
 
-    def sync_master_from_sheets(self):
+    def sync_master_from_sheets(self, scope='all'):
         """从 Google Sheets 同步主数据:报价文档 Customer -> customers, 报价 Pull 的 SL* 行 -> stock, Group -> reps。
-        客户资料与石材库存都直接读报价工具共享文档，不再读销售统计表里的 Customer / StoneStock 页签。"""
+        客户资料与石材库存都直接读报价工具共享文档，不再读销售统计表里的 Customer / StoneStock 页签。
+        scope: 'all'（默认，客户+库存全同步）、'customers'（只同步客户）、'stock'（只同步库存）。
+        独立同步只写对应表（apply_master_import 是 upsert，不动其他表）。"""
+        scope = (scope or 'all').strip().lower()
         payload = {"customers": [], "stock": [], "reps": []}
         # --- Customer（报价工具共享文档的 Customer 页签）---
         # 报价 Customer 列：No.=0, Name=1, City=3, State=4, Salesperson Code=7,
         # Phone No.=10, Cell Phone No.=11, Contact=12, Creation Date=13, Customer Type=16, E-Mail=17
-        data, err = self._fetch_quote_sheet("Customer")
-        if err:
-            return {"ok": False, "error": err}
-        for r in (data.get("rows") or []):
-            no = self._cell(r, 0).strip()
-            if not no:
-                continue
-            phone = self._cell(r, 10).strip() or self._cell(r, 11).strip()
-            payload["customers"].append({
-                "no": no, "name": self._cell(r, 1),
-                "city": self._cell(r, 3), "state": self._cell(r, 4),
-                "phone": phone, "contact": self._cell(r, 12),
-                "type": self._cell(r, 16), "email": self._cell(r, 17),
-                "sales1": self._cell(r, 7), "created": self._clean_date(self._cell(r, 13)),
-            })
-        # --- 石材库存：报价工具共享文档的 Pull，SL* 行，只进有库存的 ---
-        data, err = self._fetch_quote_sheet("Pull")
-        if err:
-            return {"ok": False, "error": err}
-        for r in (data.get("rows") or []):
-            item_no = self._cell(r, 0).strip()
-            if not item_no or not item_no.upper().startswith("SL"):
-                continue
-            available = _num(r[4] if len(r) > 4 else "")
-            in_transit = _num(r[5] if len(r) > 5 else "")
-            if available <= 0 and in_transit <= 0:
-                continue  # 无库存的行不进
-            payload["stock"].append({
-                "itemNo": item_no, "description": self._cell(r, 1),
-                "available": available, "inTransit": in_transit,
-            })
-        # --- Group ---
-        data, err = self._fetch_sheet("Group")
-        if err:
-            return {"ok": False, "error": err}
-        for r in (data.get("rows") or []):
-            for kind, ci, ni, gi in (("s1", 0, 1, 2), ("s2", 5, 6, 7)):
-                code = self._cell(r, ci).strip()
-                if not code:
+        if scope in ('all', 'customers'):
+            data, err = self._fetch_quote_sheet("Customer")
+            if err:
+                return {"ok": False, "error": err}
+            for r in (data.get("rows") or []):
+                no = self._cell(r, 0).strip()
+                if not no:
                     continue
-                payload["reps"].append({
-                    "kind": kind, "code": code,
-                    "name": self._cell(r, ni), "group": self._cell(r, gi),
+                phone = self._cell(r, 10).strip() or self._cell(r, 11).strip()
+                payload["customers"].append({
+                    "no": no, "name": self._cell(r, 1),
+                    "city": self._cell(r, 3), "state": self._cell(r, 4),
+                    "phone": phone, "contact": self._cell(r, 12),
+                    "type": self._cell(r, 16), "email": self._cell(r, 17),
+                    "sales1": self._cell(r, 7), "created": self._clean_date(self._cell(r, 13)),
                 })
+        # --- 石材库存：报价工具共享文档的 Pull，SL* 行，只进有库存的 ---
+        if scope in ('all', 'stock'):
+            data, err = self._fetch_quote_sheet("Pull")
+            if err:
+                return {"ok": False, "error": err}
+            for r in (data.get("rows") or []):
+                item_no = self._cell(r, 0).strip()
+                if not item_no or not item_no.upper().startswith("SL"):
+                    continue
+                available = _num(r[4] if len(r) > 4 else "")
+                in_transit = _num(r[5] if len(r) > 5 else "")
+                if available <= 0 and in_transit <= 0:
+                    continue  # 无库存的行不进
+                payload["stock"].append({
+                    "itemNo": item_no, "description": self._cell(r, 1),
+                    "available": available, "inTransit": in_transit,
+                })
+        # 同步 = 全量替换：先清空本地客户/库存表，再写入报价文档的最新数据
+        # （报价文档里删掉的客户/库存，同步后本地也不再有；工具里手动 Edit/Delete 的行也会被覆盖）
+        with DB_LOCK:
+            con = connect()
+            try:
+                if scope in ('all', 'customers'):
+                    con.execute("DELETE FROM customers")
+                if scope in ('all', 'stock'):
+                    con.execute("DELETE FROM stock")
+                con.commit()
+            finally:
+                con.close()
         res = self.apply_master_import(payload)
         if not res.get("ok"):
             return {"ok": False, "error": "主数据导入失败: %s" % res.get("error")}
@@ -1083,11 +1087,6 @@ def main():
     init_db()
     if os.environ.get("AUTO_SYNC") == "1":
         print("AUTO_SYNC=1,正在从 Google Sheets 同步数据...")
-        try:
-            res = Api().sync_from_sheets()
-            print("销售同步结果: %s" % json.dumps(res, ensure_ascii=False)[:500])
-        except Exception as e:
-            print("销售同步失败: %s: %s" % (type(e).__name__, e))
         try:
             res = Api().sync_master_from_sheets()
             print("主数据同步结果: %s" % json.dumps(res, ensure_ascii=False)[:500])
