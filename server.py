@@ -814,24 +814,23 @@ class Api:
             return None, "%s 接口返回失败: %s" % (sheet, data.get("error") or "")
         return data, None
 
-    def _fetch_quote_pull(self):
-        """拉取报价工具共享文档的 Pull（合并接口 ?sheet=Pull），返回 (rows, None) 或 (None, error)。
-        石材库存直接读这里：SL* 行，Available=第 4 列，Transit=第 5 列。"""
+    def _fetch_quote_sheet(self, sheet):
+        """拉取报价工具共享文档指定工作表的 {headers, rows}（合并接口）。成功返回 (data, None)，失败返回 (None, error)。"""
         base = QUOTE_PULL_API_URL.split("?")[0]
-        url = base + "?sheet=Pull"
+        url = base + "?sheet=" + urllib.parse.quote(sheet)
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "BCS-Sync/1.0"})
             with urllib.request.urlopen(req, timeout=120) as resp:
                 raw = resp.read()
         except Exception as e:
-            return None, "拉取报价 Pull 失败: %s: %s" % (type(e).__name__, e)
+            return None, "拉取报价 %s 失败: %s: %s" % (sheet, type(e).__name__, e)
         try:
             data = json.loads(raw.decode("utf-8"))
         except Exception as e:
-            return None, "报价 Pull JSON 解析失败: %s" % e
+            return None, "报价 %s JSON 解析失败: %s" % (sheet, e)
         if not data.get("ok"):
-            return None, "报价 Pull 接口返回失败: %s" % (data.get("error") or "")
-        return data.get("rows") or [], None
+            return None, "报价 %s 接口返回失败: %s" % (sheet, data.get("error") or "")
+        return data, None
 
     @staticmethod
     def _cell(r, i):
@@ -850,30 +849,32 @@ class Api:
         return s
 
     def sync_master_from_sheets(self):
-        """从 Google Sheets 同步主数据:Customer -> customers, 报价 Pull 的 SL* 行 -> stock, Group -> reps。
-        石材库存不再读销售统计表里的 StoneStock 页签，直接读报价工具共享文档的 Pull。"""
+        """从 Google Sheets 同步主数据:报价文档 Customer -> customers, 报价 Pull 的 SL* 行 -> stock, Group -> reps。
+        客户资料与石材库存都直接读报价工具共享文档，不再读销售统计表里的 Customer / StoneStock 页签。"""
         payload = {"customers": [], "stock": [], "reps": []}
-        # --- Customer ---
-        data, err = self._fetch_sheet("Customer")
+        # --- Customer（报价工具共享文档的 Customer 页签）---
+        # 报价 Customer 列：No.=0, Name=1, City=3, State=4, Salesperson Code=7,
+        # Phone No.=10, Cell Phone No.=11, Contact=12, Creation Date=13, Customer Type=16, E-Mail=17
+        data, err = self._fetch_quote_sheet("Customer")
         if err:
             return {"ok": False, "error": err}
         for r in (data.get("rows") or []):
             no = self._cell(r, 0).strip()
             if not no:
                 continue
-            phone = self._cell(r, 9).strip() or self._cell(r, 10).strip()
+            phone = self._cell(r, 10).strip() or self._cell(r, 11).strip()
             payload["customers"].append({
                 "no": no, "name": self._cell(r, 1),
-                "city": self._cell(r, 7), "state": self._cell(r, 8),
-                "phone": phone, "contact": self._cell(r, 11),
-                "type": self._cell(r, 15), "email": self._cell(r, 16),
-                "sales1": self._cell(r, 3), "created": self._clean_date(self._cell(r, 12)),
+                "city": self._cell(r, 3), "state": self._cell(r, 4),
+                "phone": phone, "contact": self._cell(r, 12),
+                "type": self._cell(r, 16), "email": self._cell(r, 17),
+                "sales1": self._cell(r, 7), "created": self._clean_date(self._cell(r, 13)),
             })
         # --- 石材库存：报价工具共享文档的 Pull，SL* 行，只进有库存的 ---
-        pull_rows, err = self._fetch_quote_pull()
+        data, err = self._fetch_quote_sheet("Pull")
         if err:
             return {"ok": False, "error": err}
-        for r in pull_rows:
+        for r in (data.get("rows") or []):
             item_no = self._cell(r, 0).strip()
             if not item_no or not item_no.upper().startswith("SL"):
                 continue
