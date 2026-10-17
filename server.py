@@ -1077,7 +1077,13 @@ def main():
     init_db()
     if os.environ.get("AUTO_SYNC") == "1":
         print("AUTO_SYNC=1,正在从 Google Sheets 同步数据...")
-        # AUTO_SYNC 只同步客户/库存（读报价文档），绝不碰销售记录（销售只走导入，接口数据会覆盖导入的销售）
+        # 销售从 V66 读（V66 数据是最新的，服务重启后自动恢复销售）
+        try:
+            res = Api().sync_from_sheets()
+            print("销售同步结果: %s" % json.dumps(res, ensure_ascii=False)[:500])
+        except Exception as e:
+            print("销售同步失败: %s: %s" % (type(e).__name__, e))
+        # 客户/库存从报价文档读（不在 V66 里）
         try:
             res = Api().sync_master_from_sheets()
             print("主数据同步结果: %s" % json.dumps(res, ensure_ascii=False)[:500])
