@@ -34,6 +34,13 @@ SHEETS_API_URL = os.environ.get(
     "SHEETS_API_URL",
     "https://script.google.com/macros/s/AKfycbya3ikjNlBc1_N4IZCzj7ssLNtLNqFKnVQr-4MkQD5oEyf5iZI3VeBnaPxjcQOuwuw73A/exec?sheet=Pull",
 )
+# 报价工具共享文档的 Pull 接口（合并接口）：石材库存直接读这里的 Pull，不再用销售统计表里的 StoneStock 页签。
+# Pull 11 列：No.=0, Description=1, Item Type=2, Qty.(On Hand)=3, Available for Sales Qty.=4,
+# Qty.(Transit)=5, Unit Price=6, Blocked=7, Only PO=8, Color=9, Category=10
+QUOTE_PULL_API_URL = os.environ.get(
+    "QUOTE_PULL_API_URL",
+    "https://script.google.com/macros/s/AKfycbxNRW6qfXFVunloGzMmFbw0WgaHYqs2OHpA40O-fpsm2WKv_1E7s-eXV-0pX-X6Slw8pQ/exec",
+)
 UI_DIR = os.path.join(BASE_DIR, "ui")
 
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -807,6 +814,25 @@ class Api:
             return None, "%s 接口返回失败: %s" % (sheet, data.get("error") or "")
         return data, None
 
+    def _fetch_quote_pull(self):
+        """拉取报价工具共享文档的 Pull（合并接口 ?sheet=Pull），返回 (rows, None) 或 (None, error)。
+        石材库存直接读这里：SL* 行，Available=第 4 列，Transit=第 5 列。"""
+        base = QUOTE_PULL_API_URL.split("?")[0]
+        url = base + "?sheet=Pull"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "BCS-Sync/1.0"})
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                raw = resp.read()
+        except Exception as e:
+            return None, "拉取报价 Pull 失败: %s: %s" % (type(e).__name__, e)
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except Exception as e:
+            return None, "报价 Pull JSON 解析失败: %s" % e
+        if not data.get("ok"):
+            return None, "报价 Pull 接口返回失败: %s" % (data.get("error") or "")
+        return data.get("rows") or [], None
+
     @staticmethod
     def _cell(r, i):
         try:
@@ -824,7 +850,8 @@ class Api:
         return s
 
     def sync_master_from_sheets(self):
-        """从 Google Sheets 同步主数据:Customer -> customers, StoneStock -> stock, Group -> reps。"""
+        """从 Google Sheets 同步主数据:Customer -> customers, 报价 Pull 的 SL* 行 -> stock, Group -> reps。
+        石材库存不再读销售统计表里的 StoneStock 页签，直接读报价工具共享文档的 Pull。"""
         payload = {"customers": [], "stock": [], "reps": []}
         # --- Customer ---
         data, err = self._fetch_sheet("Customer")
@@ -842,18 +869,21 @@ class Api:
                 "type": self._cell(r, 15), "email": self._cell(r, 16),
                 "sales1": self._cell(r, 3), "created": self._clean_date(self._cell(r, 12)),
             })
-        # --- StoneStock ---
-        data, err = self._fetch_sheet("StoneStock")
+        # --- 石材库存：报价工具共享文档的 Pull，SL* 行，只进有库存的 ---
+        pull_rows, err = self._fetch_quote_pull()
         if err:
             return {"ok": False, "error": err}
-        for r in (data.get("rows") or []):
+        for r in pull_rows:
             item_no = self._cell(r, 0).strip()
-            if not item_no:
+            if not item_no or not item_no.upper().startswith("SL"):
                 continue
+            available = _num(r[4] if len(r) > 4 else "")
+            in_transit = _num(r[5] if len(r) > 5 else "")
+            if available <= 0 and in_transit <= 0:
+                continue  # 无库存的行不进
             payload["stock"].append({
                 "itemNo": item_no, "description": self._cell(r, 1),
-                "available": _num(r[2] if len(r) > 2 else ""),
-                "inTransit": _num(r[3] if len(r) > 3 else ""),
+                "available": available, "inTransit": in_transit,
             })
         # --- Group ---
         data, err = self._fetch_sheet("Group")
