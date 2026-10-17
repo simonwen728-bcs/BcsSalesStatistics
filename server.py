@@ -1077,12 +1077,7 @@ def main():
     init_db()
     if os.environ.get("AUTO_SYNC") == "1":
         print("AUTO_SYNC=1,正在从 Google Sheets 同步数据...")
-        # 启动自动恢复：先恢复销售记录（重启后本地库清空，销售只能从这里回来；手动同步按钮不碰销售）
-        try:
-            res = Api().sync_from_sheets()
-            print("销售同步结果: %s" % json.dumps(res, ensure_ascii=False)[:500])
-        except Exception as e:
-            print("销售同步失败: %s: %s" % (type(e).__name__, e))
+        # AUTO_SYNC 只同步客户/库存（读报价文档），绝不碰销售记录（销售只走导入，接口数据会覆盖导入的销售）
         try:
             res = Api().sync_master_from_sheets()
             print("主数据同步结果: %s" % json.dumps(res, ensure_ascii=False)[:500])
