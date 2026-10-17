@@ -927,14 +927,14 @@ class Api:
                     "itemNo": item_no, "description": self._cell(r, 1),
                     "available": available, "inTransit": in_transit,
                 })
-        # 业务分组恢复：仅本地 Group 为空时从 V66 Group 表恢复；本地有 Group 时不动。
+        # 业务分组恢复：任何 scope 的主数据同步都跑（前端按钮传 customers/stock，不是 all）。
+        # _restore 内部已判断：仅本地 Group 为空时从 V66 Group 表恢复；本地有 Group 时不动。
         # 注意：Group 在 V66 里（不是报价文档），走 V66 接口 _fetch_sheet。
-        if scope in ('all',):
-            reps_restored, reps_err = self._restore_reps_from_v66_if_empty()
-            if reps_err:
-                return {"ok": False, "error": reps_err}
-            if isinstance(reps_restored, list):
-                payload["reps"] = reps_restored
+        reps_restored, reps_err = self._restore_reps_from_v66_if_empty()
+        if reps_err:
+            return {"ok": False, "error": reps_err}
+        if isinstance(reps_restored, list):
+            payload["reps"] = reps_restored
         # 同步 = 导入式更新（与原来的导入功能一致，只是来源改成远程报价文档）：
         # 新增的加上，已有的用报价文档数据更新，不在报价文档里的本地行保留（不清空）
         res = self.apply_master_import(payload)
