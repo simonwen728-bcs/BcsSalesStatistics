@@ -3339,6 +3339,26 @@
     $('#cust-search').addEventListener('input', (e) => { S.custQuery = e.target.value; clearTimeout(custTm); custTm = setTimeout(renderCustomers, 300); });
     $('#cust-add').onclick = () => editCustomer();
     $('#cust-import').onclick = importCustomersFlow;
+    // 客户页同步：只从报价文档 Customer 同步客户，全量替换本地客户表，不动库存/销售
+    $('#cust-sync').onclick = async () => {
+      const btn = $('#cust-sync');
+      if (btn.disabled) return;
+      btn.disabled = true;
+      const old = btn.textContent;
+      btn.textContent = '🔄 ' + t('syncing');
+      try {
+        const m = await api('sync_master_from_sheets', 'customers');
+        if (!m || !m.ok) throw new Error((m && m.error) || 'sync failed');
+        invalidateCtx();
+        renderCustomers();
+        toast(tf('syncCustomersDone', { c: m.customers || 0 }));
+      } catch (e) {
+        toast(t('syncFail') + ': ' + (e && e.message || e));
+      } finally {
+        btn.disabled = false;
+        btn.textContent = old;
+      }
+    };
     $('#cust-edit').onclick = () => { const e = sheetSelEntry(); if (e) editCustomer(e); };
     $('#cust-del').onclick = async () => {
       const e = sheetSelEntry();
@@ -3354,6 +3374,26 @@
     $('#inv-search').addEventListener('input', (e) => { S.invQuery = e.target.value; clearTimeout(invTm); invTm = setTimeout(renderInventory, 300); });
     $('#inv-add').onclick = () => editStock();
     $('#inv-import').onclick = importStockFlow;
+    // 库存页同步：只从报价文档 Pull 的 SL* 行同步库存，全量替换本地库存表，不动客户/销售
+    $('#inv-sync').onclick = async () => {
+      const btn = $('#inv-sync');
+      if (btn.disabled) return;
+      btn.disabled = true;
+      const old = btn.textContent;
+      btn.textContent = '🔄 ' + t('syncing');
+      try {
+        const m = await api('sync_master_from_sheets', 'stock');
+        if (!m || !m.ok) throw new Error((m && m.error) || 'sync failed');
+        invalidateCtx();
+        renderInventory();
+        toast(tf('syncStockDone', { st: m.stock || 0 }));
+      } catch (e) {
+        toast(t('syncFail') + ': ' + (e && e.message || e));
+      } finally {
+        btn.disabled = false;
+        btn.textContent = old;
+      }
+    };
     $('#inv-edit').onclick = () => { const e = sheetSelEntry(); if (e) editStock(e); };
     $('#inv-del').onclick = async () => {
       const e = sheetSelEntry();
