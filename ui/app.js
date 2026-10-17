@@ -1750,34 +1750,9 @@
     saveBtn.textContent = '💾 ' + t('miSave') + ' (Ctrl+S)';   // 快捷键直接标在按钮上，使用者不用查
     saveBtn.title = t('manualSavedTip');
     saveBtn.onclick = manualSave;
-    // 远程版：从 Google Sheets 同步数据
-    const syncBtn = document.createElement('button');
-    syncBtn.className = 'btn ghost';
-    syncBtn.textContent = '🔄 ' + t('syncSheets');
-    syncBtn.title = t('syncSheets');
-    syncBtn.onclick = async () => {
-      if (syncBtn.disabled) return;
-      syncBtn.disabled = true;
-      syncBtn.textContent = '🔄 ' + t('syncing');
-      try {
-        // 销售数据是导入进工具的，不从 V66 同步；全局同步只同步主数据（客户+库存，读报价文档）
-        const m = await api('sync_master_from_sheets');
-        if (!m || !m.ok) throw new Error((m && m.error) || 'sync_master_from_sheets failed');
-        renderTab(S.nav);
-        toast(tf('syncDoneMsg', {
-          c: m.customers || 0, st: m.stock || 0,
-        }));
-      } catch (e) {
-        toast(t('syncFail') + ': ' + (e && e.message || e));
-      } finally {
-        syncBtn.disabled = false;
-        syncBtn.textContent = '🔄 ' + t('syncSheets');
-      }
-    };
     mb.appendChild(brand);
     mb.appendChild(file);
     mb.appendChild(spacer);
-    mb.appendChild(syncBtn);
     mb.appendChild(saveBtn);
     mb.appendChild(langBtn);
     mb.appendChild(fsBtn);
