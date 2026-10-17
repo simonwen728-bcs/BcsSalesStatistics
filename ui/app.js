@@ -443,6 +443,7 @@
     isRendering: false,    // renderSpec 进行中标志（定时快照避让）
     dataToken: 0,          // 数据变更计数（导航时表内容未变则跳过重渲染，毫秒级切换）
     sheetToken: {},        // 工作表名 → 渲染时对应的 (dataToken+查询条件)，用于跳过重渲染
+    sheetCtxCache: {},     // 工作表名 → 该页最近一次全量渲染的 sheetCtx；activateIfFresh 短路返回时恢复，避免切回页面后 sheetCtx 为空导致行选不中、Edit/Delete 点了没反应
     lastRenderedSheet: '', // 最近渲染的表（切换/渲染前/关闭时只同步它，避免全表扫描卡顿）
     pendingSaves: [],      // 进行中的异步保存（关闭前 __flushMemory 等它们全部落库）
     appliedLayouts: {},    // 工作表名 → 本会话最后一次应用的列宽（快照基线，仅内存）
@@ -1950,6 +1951,8 @@
       if (um) um.style.display = (id === 'history') ? 'none' : 'block';
       S.sheetCtx = null;
       S.sheetSel = -1;
+      // 切页面时把各数据页的 Edit/Delete 复位为禁用，避免上一页残留的启用状态 + 旧选中导致点删除没反应或删错行；点行后 onSheetCell 再按当前页启用
+      ['sales-edit', 'cust-edit', 'cust-del', 'inv-edit', 'inv-del', 'reps-edit', 'reps-del'].forEach((bid) => { const b = document.getElementById(bid); if (b) b.disabled = true; });
       renderTab(id);
     }
     buildSidebar();
@@ -2338,7 +2341,7 @@
   async function renderSales() {
     const all = !S.pageSize;   // pageSize=0 = 加载全部
     const tk = 'sales:' + S.dataToken + ':' + JSON.stringify(S.salesFilters) + ':' + S.salesPage + ':' + (all ? 'all' : S.pageSize);
-    if (await activateIfFresh(t('tabSales'), tk)) return;
+    if (await activateIfFresh(t('tabSales'), tk)) { S.sheetCtx = S.sheetCtxCache[t('tabSales')] || null; return; }
     const token = ++salesToken;
     let res;
     const ALL_CAP = 60000;   // 全部档上限（真实数据 5.35 万行全量可渲染）
@@ -2361,6 +2364,7 @@
     res.rows.forEach((r) => values.push(SALES_COLS.map(([k]) => (r[k] === null || r[k] === undefined ? '' : r[k]))));
     const n = values.length;
     S.sheetCtx = { kind: 'sales', rows: res.rows, startRow: 1, colCount: SALES_COLS.length };
+    S.sheetCtxCache[t('tabSales')] = S.sheetCtx;
     await renderSpec({
       sheet: t('tabSales'), values,
       numFmt: [
@@ -2405,12 +2409,13 @@
   const CUST_COLS = [['no', 'custNo'], ['name', 'custName'], ['sales1', 'colRep1'], ['created', 'custCreated'], ['city', 'colCity'], ['state', 'colState'], ['phone', 'colPhone'], ['contact', 'colContact'], ['type', 'colCustType'], ['email', 'colEmail']];
   async function renderCustomers() {
     const tk = 'cust:' + S.dataToken + ':' + (S.custQuery || '');
-    if (await activateIfFresh(t('tabCustomers'), tk)) return;
+    if (await activateIfFresh(t('tabCustomers'), tk)) { S.sheetCtx = S.sheetCtxCache[t('tabCustomers')] || null; return; }
     const list = await api('get_all_customers', S.custQuery);
     $('#cust-count').textContent = list.length ? String(list.length) : '';
     const values = [CUST_COLS.map(([, lk]) => t(lk))];
     list.slice(0, 5000).forEach((r) => values.push(CUST_COLS.map(([k]) => (r[k] === null || r[k] === undefined ? '' : r[k]))));
     S.sheetCtx = { kind: 'customers', rows: list.slice(0, 5000), startRow: 1, colCount: CUST_COLS.length };
+    S.sheetCtxCache[t('tabCustomers')] = S.sheetCtx;
     await renderSpec({ sheet: t('tabCustomers'), values, freeze: { rows: 1, cols: 0 } });
     S.sheetToken[t('tabCustomers')] = tk;
     S.lastHLRow = null;
@@ -2448,7 +2453,7 @@
   const INV_COLS = [['itemNo', 'invItemNo'], ['description', 'invDesc'], ['available', 'invAvailable'], ['inTransit', 'invInTransit'], ['stockCalc', 'invStock']];
   async function renderInventory() {
     const tk = 'inv:' + S.dataToken + ':' + (S.invQuery || '');
-    if (await activateIfFresh(t('tabInventory'), tk)) return;
+    if (await activateIfFresh(t('tabInventory'), tk)) { S.sheetCtx = S.sheetCtxCache[t('tabInventory')] || null; return; }
     const list = await api('get_all_stock', S.invQuery);
     $('#inv-count').textContent = list.length ? String(list.length) : '';
     const values = [INV_COLS.map(([, lk]) => t(lk))];
@@ -2459,6 +2464,7 @@
     ]));
     const n = values.length;
     S.sheetCtx = { kind: 'inventory', rows: list, startRow: 1, colCount: INV_COLS.length };
+    S.sheetCtxCache[t('tabInventory')] = S.sheetCtx;
     await renderSpec({
       sheet: t('tabInventory'), values,
       numFmt: [{ range: 'C2:E' + n, fmt: '#,##0' }],
@@ -2495,7 +2501,7 @@
   // ================= reps page =================
   async function renderReps() {
     const tk = 'reps:' + S.dataToken;
-    if (await activateIfFresh(t('tabReps'), tk)) return;
+    if (await activateIfFresh(t('tabReps'), tk)) { S.sheetCtx = S.sheetCtxCache[t('tabReps')] || null; return; }
     const reps = await api('get_all_reps');
     const s1 = reps.s1 || [], s2 = reps.s2 || [];
     const values = [[t('repsS1'), '', '', '']];
@@ -2508,6 +2514,7 @@
     s2.forEach((r) => { ctxRows.push({ kind: 's2', rec: r }); values.push(['', r.code, r.name, r.group || '']); });
     const n = values.length;
     S.sheetCtx = { kind: 'reps', rows: ctxRows, startRow: 2, colCount: 4 };
+    S.sheetCtxCache[t('tabReps')] = S.sheetCtx;
     const bold = [rngA(1, 1, 1, 4), rngA(2, 1, 2, 4), rngA(n - s2.length - 1, 1, n - s2.length - 1, 4), rngA(n - s2.length, 1, n - s2.length, 4)];
     const bg = [{ range: rngA(1, 1, 1, 4), color: '#d9e6f3' }, { range: rngA(n - s2.length - 1, 1, n - s2.length - 1, 4), color: '#d9e6f3' }];
     await renderSpec({ sheet: t('tabReps'), values, bold, bg, freeze: { rows: 0, cols: 0 } });
