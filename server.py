@@ -896,18 +896,8 @@ class Api:
                     "itemNo": item_no, "description": self._cell(r, 1),
                     "available": available, "inTransit": in_transit,
                 })
-        # 同步 = 全量替换：先清空本地客户/库存表，再写入报价文档的最新数据
-        # （报价文档里删掉的客户/库存，同步后本地也不再有；工具里手动 Edit/Delete 的行也会被覆盖）
-        with DB_LOCK:
-            con = connect()
-            try:
-                if scope in ('all', 'customers'):
-                    con.execute("DELETE FROM customers")
-                if scope in ('all', 'stock'):
-                    con.execute("DELETE FROM stock")
-                con.commit()
-            finally:
-                con.close()
+        # 同步 = 导入式更新（与原来的导入功能一致，只是来源改成远程报价文档）：
+        # 新增的加上，已有的用报价文档数据更新，不在报价文档里的本地行保留（不清空）
         res = self.apply_master_import(payload)
         if not res.get("ok"):
             return {"ok": False, "error": "主数据导入失败: %s" % res.get("error")}
@@ -1087,6 +1077,12 @@ def main():
     init_db()
     if os.environ.get("AUTO_SYNC") == "1":
         print("AUTO_SYNC=1,正在从 Google Sheets 同步数据...")
+        # 启动自动恢复：先恢复销售记录（重启后本地库清空，销售只能从这里回来；手动同步按钮不碰销售）
+        try:
+            res = Api().sync_from_sheets()
+            print("销售同步结果: %s" % json.dumps(res, ensure_ascii=False)[:500])
+        except Exception as e:
+            print("销售同步失败: %s: %s" % (type(e).__name__, e))
         try:
             res = Api().sync_master_from_sheets()
             print("主数据同步结果: %s" % json.dumps(res, ensure_ascii=False)[:500])
