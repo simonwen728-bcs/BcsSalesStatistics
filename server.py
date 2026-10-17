@@ -32,7 +32,7 @@ DB_PATH = os.path.join(DATA_DIR, "bcs_data.db")
 PREFS_PATH = os.path.join(DATA_DIR, "prefs.json")
 SHEETS_API_URL = os.environ.get(
     "SHEETS_API_URL",
-    "https://script.google.com/macros/s/AKfycbya3ikjNlBc1_N4IZCzj7ssLNtLNqFKnVQr-4MkQD5oEyf5iZI3VeBnaPxjcQOuwuw73A/exec?sheet=Pull",
+    "https://script.google.com/macros/s/AKfycbwmHqWobogKZ6CEAoyUPzn6sMorU_ZfigS-wRKt-goWuirAggXQb_BUiHB4FjTbknPR/exec?sheet=Pull",
 )
 # 报价工具共享文档的 Pull 接口（合并接口）：石材库存直接读这里的 Pull，不再用销售统计表里的 StoneStock 页签。
 # Pull 11 列：No.=0, Description=1, Item Type=2, Qty.(On Hand)=3, Available for Sales Qty.=4,
