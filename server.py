@@ -853,8 +853,39 @@ class Api:
                 continue
         return s
 
+    def _restore_reps_from_v66_if_empty(self):
+        """业务分组恢复：仅当本地 reps 表没有任何 group_ 非空行时，才从 V66 Group 表恢复。
+        本地有 Group 数据时不动（手动改的不会被覆盖）；容器重置后 reps 被销售同步补回但 group_ 全空，
+        此时从 V66 恢复 Group。返回 (restored_count, error)。"""
+        try:
+            con = connect()
+            try:
+                n = con.execute(
+                    "SELECT COUNT(*) FROM reps WHERE (deleted IS NULL OR deleted=0) AND group_ IS NOT NULL AND group_<>''"
+                ).fetchone()[0]
+            finally:
+                con.close()
+        except Exception as e:
+            return 0, "检查 reps 表失败: %s" % e
+        if n > 0:
+            return 0, None  # 本地已有 Group，不动
+        data, err = self._fetch_sheet("Group")
+        if err:
+            return 0, err
+        reps = []
+        for r in (data.get("rows") or []):
+            # Sales1：A=Code B=Name C=Group 1；Sales2：F=Code G=Name H=Group 2（两栏并排）
+            c1 = self._cell(r, 0).strip()
+            if c1 and c1.upper() not in ("SALES1 CODE", "CODE"):
+                reps.append({"kind": "s1", "code": c1, "name": self._cell(r, 1), "group": self._cell(r, 2)})
+            c2 = self._cell(r, 5).strip() if len(r) > 5 else ""
+            if c2 and c2.upper() not in ("SALES2 CODE", "CODE"):
+                reps.append({"kind": "s2", "code": c2, "name": self._cell(r, 6) if len(r) > 6 else "",
+                             "group": self._cell(r, 7) if len(r) > 7 else ""})
+        return reps, None
+
     def sync_master_from_sheets(self, scope='all'):
-        """从 Google Sheets 同步主数据:报价文档 Customer -> customers, 报价 Pull 的 SL* 行 -> stock, Group -> reps。
+        """从 Google Sheets 同步主数据:报价文档 Customer -> customers, 报价 Pull 的 SL* 行 -> stock, V66 Group -> reps（仅本地 Group 为空时恢复）。
         客户资料与石材库存都直接读报价工具共享文档，不再读销售统计表里的 Customer / StoneStock 页签。
         scope: 'all'（默认，客户+库存全同步）、'customers'（只同步客户）、'stock'（只同步库存）。
         独立同步只写对应表（apply_master_import 是 upsert，不动其他表）。"""
@@ -896,6 +927,14 @@ class Api:
                     "itemNo": item_no, "description": self._cell(r, 1),
                     "available": available, "inTransit": in_transit,
                 })
+        # 业务分组恢复：仅本地 Group 为空时从 V66 Group 表恢复；本地有 Group 时不动。
+        # 注意：Group 在 V66 里（不是报价文档），走 V66 接口 _fetch_sheet。
+        if scope in ('all',):
+            reps_restored, reps_err = self._restore_reps_from_v66_if_empty()
+            if reps_err:
+                return {"ok": False, "error": reps_err}
+            if isinstance(reps_restored, list):
+                payload["reps"] = reps_restored
         # 同步 = 导入式更新（与原来的导入功能一致，只是来源改成远程报价文档）：
         # 新增的加上，已有的用报价文档数据更新，不在报价文档里的本地行保留（不清空）
         res = self.apply_master_import(payload)
