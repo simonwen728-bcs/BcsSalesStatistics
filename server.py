@@ -842,10 +842,15 @@ class Api:
 
     @staticmethod
     def _clean_date(v):
-        # Google Sheets may return ISO datetime like 2024-08-01T00:00:00.000Z; keep only YYYY-MM-DD
+        # 统一成 YYYY-MM-DD：ISO（含时间后缀）取日期部分；美式 M/D/YYYY 转 ISO；无法解析的原样返回
         s = (v or "").strip()
-        if len(s) >= 10 and s[4] == "-" and s[7] == "-":
-            return s[:10]
+        if not s:
+            return s
+        for fmt, txt in (("%Y-%m-%d", s[:10]), ("%m/%d/%Y", s)):
+            try:
+                return datetime.strptime(txt, fmt).strftime("%Y-%m-%d")
+            except Exception:
+                continue
         return s
 
     def sync_master_from_sheets(self):
