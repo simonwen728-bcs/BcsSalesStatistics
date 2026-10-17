@@ -1760,14 +1760,12 @@
       syncBtn.disabled = true;
       syncBtn.textContent = '🔄 ' + t('syncing');
       try {
-        const s = await api('sync_from_sheets');
+        // 销售数据是导入进工具的，不从 V66 同步；全局同步只同步主数据（客户+库存，读报价文档）
         const m = await api('sync_master_from_sheets');
-        if (!s || !s.ok) throw new Error((s && s.error) || 'sync_from_sheets failed');
         if (!m || !m.ok) throw new Error((m && m.error) || 'sync_master_from_sheets failed');
         renderTab(S.nav);
         toast(tf('syncDoneMsg', {
-          s: s.rows || 0, m: s.months || 0,
-          c: m.customers || 0, st: m.stock || 0, r: m.reps || 0,
+          c: m.customers || 0, st: m.stock || 0,
         }));
       } catch (e) {
         toast(t('syncFail') + ': ' + (e && e.message || e));
