@@ -1167,6 +1167,37 @@
     try { window.dispatchEvent(new Event('resize')); } catch(e) { /* ignore */ }
   }
 
+  function renderCategoryTemplate(spec, sh) {
+    const nr=spec.values.length, nc=spec.values[0].length, key=String(spec.sheet);
+    const user=S.userStyles[key] || {}, baseline={};
+    const qty=(spec.numFmt[0] || {}).fmt === '#,##0';
+    const pattern=zhFmt(qty ? '#,##0' : '#,##0.00');
+    const matrix=spec.values.map((row,r)=>Array.from({length:nc},(_,c)=>{
+      const header=r<2, total=r===nr-1;
+      const st=Object.assign({bl:header || total ? 1 : 0},
+        header ? {bg:{rgb:'#D9E8F5'}} : total ? {bg:{rgb:'#d9e6f3'}} : {},user[r+':'+c] || {});
+      st.ht=header ? 2 : c<3 ? 1 : qty ? 2 : 3;
+      st.vt=2;
+      if(!header && c>=3) st.n={pattern};
+      if(r<300 && c<60) baseline[r+':'+c]=st;
+      return {v:row[c]===0 || row[c]===undefined ? '' : row[c],s:st};
+    }));
+    // 年度/月数变化时先解除旧合并，避免原表头范围残留。
+    sh.getMergeData().forEach((r)=>r.breakApart());
+    sh.getRange(0,0,nr,nc).setValues(matrix);
+    (spec.merges || []).forEach((r)=>sh.getRange(r).merge());
+    const monthStart=spec.values[1].findIndex((v)=>v!=='' && v!=null);
+    const widths=Array.from({length:nc},(_,c)=>c===0 || c===1 ? 100 : c===2 ? 200 : c<monthStart ? 120 : 100);
+    widths.forEach((w,c)=>sh.setColumnWidth(c,w));
+    sh.showRows(0,nr);sh.setRowHeights(0,nr,30);
+    sh.setFrozenRows(2);sh.setFrozenColumns(3);
+    S.appliedLayouts[key]={w:widths,h:{},fz:{y:2,x:3}};
+    S.appliedStyles[key]=baseline;
+    S.sheetExtent=S.sheetExtent || {};S.sheetExtent[key]={rows:nr,cols:nc};
+    S.lastRenderedSheet=key;sh.activate();
+    try {window.dispatchEvent(new Event('resize'));} catch(e) { /* ignore */ }
+  }
+
   async function renderSpecInnerBody(spec) {
     placeMount();
     // 每个功能拥有自己的工作表：按 spec.sheet 找表（无则新建），原地清空重写，不影响其他功能的表
@@ -1258,6 +1289,10 @@
     try {
       if (sh.getMaxRows() < need) sh.insertRows(sh.getMaxRows(), need - sh.getMaxRows());
     } catch (e) { /* ignore */ }
+    if (spec.sheet === '销售查询' && !off) {
+      renderCategoryTemplate(spec, sh);
+      return;
+    }
     if (['销售业绩', '客户订单统计'].includes(spec.sheet) && !off) {
       renderPerformanceTemplate(spec, sh);
       return;
@@ -1539,14 +1574,20 @@
     const reusableOrders = priorOrders && !priorOrders.saveFailed &&
       priorOrders.ordersAlgorithm === 1 && priorOrders.ordersRange === performanceRange;
     const knownOrdersRevision = reusableOrders ? priorOrders.dataRevision || '' : '';
-    const priorFast = reusableAnnual ? priorAnnual : reusablePerformance ? priorPerformance : reusableOrders ? priorOrders : null;
+    const categoryRange = JSON.stringify([opts.start || '', opts.end || '', opts.category || 'ALL', opts.mode || 'amount', annualWindow]);
+    const priorCategory = def.id === 'categoryQuery' ? S.statResults[def.id] : null;
+    const reusableCategory = priorCategory && !priorCategory.saveFailed &&
+      priorCategory.categoryAlgorithm === 1 && priorCategory.categoryRange === categoryRange;
+    const knownCategoryRevision = reusableCategory ? priorCategory.dataRevision || '' : '';
+    const priorFast = reusableAnnual ? priorAnnual : reusablePerformance ? priorPerformance : reusableOrders ? priorOrders : reusableCategory ? priorCategory : null;
     S.ctxCache = null; // 每次重新生成都读取最新数据，避免把旧缓存保存成新报表。
     const ctx = getCtx(opts.start, opts.end) || await (async () => {
       const c = await normalizeCtx(def.id === 'annual' ? await api('get_annual_context', knownAnnualRevision) :
         def.id === 'salesPerformance' ? await api('get_performance_context', opts.start || '', opts.end || '', knownPerformanceRevision) :
         def.id === 'customerOrders' ? await api('get_orders_context', opts.start || '', opts.end || '', knownOrdersRevision) :
+        def.id === 'categoryQuery' ? await api('get_category_context', opts.start || '', opts.end || '', knownCategoryRevision) :
         await api('get_stats_context', opts.start || '', opts.end || ''));
-      if (!['annual', 'salesPerformance', 'customerOrders'].includes(def.id)) putCtx(opts.start || '', opts.end || '', c);
+      if (!['annual', 'salesPerformance', 'customerOrders', 'categoryQuery'].includes(def.id)) putCtx(opts.start || '', opts.end || '', c);
       return c;
     })();
     const pf1 = performance.now();
@@ -1615,6 +1656,11 @@
       spec.dataRevision = revision;
       spec.annualWindow = annualWindow;
       spec.annualAlgorithm = 2;
+    }
+    if (def.id === 'categoryQuery') {
+      spec.dataRevision = revision;
+      spec.categoryRange = categoryRange;
+      spec.categoryAlgorithm = 1;
     }
     if (def.id === 'customerOrders') {
       spec.dataRevision = revision;
