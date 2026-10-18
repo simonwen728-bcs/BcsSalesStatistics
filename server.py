@@ -559,11 +559,21 @@ class Api:
         return {"ok": True}
 
     # ---- 主数据导入 ----
-    def apply_master_import(self, payload_json):
+    def apply_master_import(self, payload_json, replace_customers=False, replace_stock=False):
         p = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
+        if replace_customers:
+            customers = p.get("customers")
+            if not isinstance(customers, list) or not customers or any(
+                not isinstance(c, dict) or not str(c.get("no") or "").strip()
+                for c in customers
+            ):
+                return {"ok": False, "error": "客户数据为空或格式异常，已保留原有客户。"}
         with DB_LOCK:
             con = connect()
             try:
+                # 删除和写入在同一个事务内；写入失败时关闭连接会回滚。
+                if replace_customers:
+                    con.execute("DELETE FROM customers")
                 for c in (p.get("customers") or []):
                     no = (c.get("no") or c.get("custNo") or "").strip()
                     if not no:
@@ -579,6 +589,8 @@ class Api:
                          c.get("state") or "", c.get("phone") or "", c.get("contact") or "",
                          c.get("type") or "", c.get("email") or "",
                          (c.get("sales1") or "").strip().upper(), c.get("created") or c.get("created_at") or ""))
+                if replace_stock:
+                    con.execute("DELETE FROM stock")
                 for s in (p.get("stock") or []):
                     item_no = (s.get("itemNo") or s.get("item_no") or "").strip()
                     if not item_no:
@@ -782,7 +794,12 @@ class Api:
             data, err = self._fetch_quote_sheet("Customer")
             if err:
                 return {"ok": False, "error": err}
-            for r in (data.get("rows") or []):
+            rows = data.get("rows")
+            if not isinstance(rows, list) or not rows:
+                return {"ok": False, "error": "Customer 返回空表或格式异常，已保留原有客户。"}
+            for r in rows:
+                if not isinstance(r, list) or len(r) < 18:
+                    return {"ok": False, "error": "Customer 列数或格式异常，已保留原有客户。"}
                 no = self._cell(r, 0).strip()
                 if not no:
                     continue
@@ -799,7 +816,12 @@ class Api:
             data, err = self._fetch_quote_sheet("Pull")
             if err:
                 return {"ok": False, "error": err}
-            for r in (data.get("rows") or []):
+            rows = data.get("rows")
+            if not isinstance(rows, list) or not rows:
+                return {"ok": False, "error": "Pull 返回空表或格式异常，已保留原有库存。"}
+            for r in rows:
+                if not isinstance(r, list) or len(r) < 6:
+                    return {"ok": False, "error": "Pull 列数或格式异常，已保留原有库存。"}
                 item_no = self._cell(r, 0).strip()
                 if not item_no or not item_no.upper().startswith("SL"):
                     continue
@@ -811,9 +833,11 @@ class Api:
                     "itemNo": item_no, "description": self._cell(r, 1),
                     "available": available, "inTransit": in_transit,
                 })
-        # 同步 = 导入式更新（与原来的导入功能一致，只是来源改成远程报价文档）：
-        # 新增的加上，已有的用报价文档数据更新，不在报价文档里的本地行保留（不清空）
-        res = self.apply_master_import(payload)
+        # 同步以 Customer / Pull 为准；普通文件导入保留原有合并逻辑。
+        # 空表拒绝替换；成功读取后，在同一事务中替换客户，不修改销售历史。
+        res = self.apply_master_import(
+            payload, replace_customers=scope in ('all', 'customers'),
+            replace_stock=scope in ('all', 'stock'))
         if not res.get("ok"):
             return {"ok": False, "error": "主数据导入失败: %s" % res.get("error")}
         return {"ok": True, "customers": len(payload["customers"]),
