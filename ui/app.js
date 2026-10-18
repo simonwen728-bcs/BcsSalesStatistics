@@ -2739,7 +2739,13 @@
   let dashTotalsTimer=null;
   function renderDashTotals() {
     let footer=document.getElementById('dash-fixed-totals');
-    if(!footer){footer=document.createElement('div');footer.id='dash-fixed-totals';footer.style.cssText='height:30px;flex:0 0 30px;overflow:hidden;position:relative;background:#d9e6f3;border-top:1px solid #b5c7db';$('#dash-analysis-panel').appendChild(footer);}
+    if(!footer){
+      footer=document.createElement('div');footer.id='dash-fixed-totals';
+      // Overlay inside the sheet viewport, above its horizontal scrollbar.
+      // Extra blank worksheet rows keep the last data row reachable by scrolling.
+      footer.style.cssText='height:30px;overflow:hidden;position:absolute;top:auto;left:0;right:14px;bottom:14px;z-index:30;background:#d9e6f3;border-top:1px solid #b5c7db;pointer-events:none';
+      $('#dash-ana-box').appendChild(footer);
+    }
     const vals=[...(S.dash.yearTotal || []),'',...(S.dash.monthTotal || [])];
     footer.innerHTML=vals.map((v,i)=>'<div data-total-col="'+i+'" style="visibility:hidden;position:absolute;top:0;height:30px;line-height:30px;padding:0 6px;box-sizing:border-box;border-right:1px solid #a7b7ca;border-bottom:1px solid #a7b7ca;font-weight:bold;white-space:nowrap;text-align:'+([0,4,5].includes(i)?'center':'right')+'">'+esc(typeof v==='number'?fmtMoney(v):v)+'</div>').join('');
     const update=()=>{
@@ -2758,7 +2764,11 @@
         const cssScale=footer.offsetWidth ? fr.width/footer.offsetWidth : 1;
         const canvasScale=cr.width/canvas.clientWidth;
         const zoom=sh.getSheet().getZoomRatio() || 1,scroll=wb.getScrollStateBySheetId(sh.getSheetId()) || {};
-        const sx=Number(scroll.viewportScrollX) || 0;
+        // This bundled Univer version returns a starting column + pixel offset,
+        // not viewportScrollX. Convert that state to worksheet coordinates.
+        const first=sh.getRange(0,0,1,1).getCellRect();
+        const startCol=Math.max(0,Number(scroll.sheetViewStartColumn)||0);
+        const sx=sh.getRange(0,startCol,1,1).getCellRect().left-first.left+(Number(scroll.offsetX)||0);
         const scale=zoom*canvasScale/cssScale,origin=(cr.left-fr.left)/cssScale;
         const gridLeft=origin+sh.getRange(0,0,1,1).getCellRect().left*scale;
         for(const el of footer.children){
