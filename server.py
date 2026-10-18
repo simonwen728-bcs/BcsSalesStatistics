@@ -359,18 +359,35 @@ class Api:
                  "rows": r["rows"] or 0, "importedAt": r["imported_at"] or ""} for r in rows]
 
     # ---- 统计上下文(报表/客户动态用) ----
-    def get_annual_context(self):
-        # 年度只需要日期、类别、业务员代码和金额；不传客户/库存及其余销售字段。
+    def get_annual_context(self, known_revision=""):
         with DB_LOCK:
             con = connect()
             try:
-                rows = con.execute("SELECT sold_date,type,rep1,amount FROM sales ORDER BY sold_date,invoice,id").fetchall()
                 revision = read_data_revision(con)
+                if known_revision and known_revision == revision:
+                    return {"unchanged": True, "revision": revision}
+                cached = getattr(self, "_annual_cache", None)
+                if cached and cached["revision"] == revision:
+                    return cached
+                # 完整月份适用于年度/月度及TTM；非标准日期保持原值交给前端原日期解析器。
+                rows = con.execute("""
+                    SELECT CASE WHEN LENGTH(sold_date)=10
+                        AND sold_date LIKE '____-__-__'
+                        AND SUBSTR(sold_date,6,2) BETWEEN '01' AND '12'
+                        AND SUBSTR(sold_date,9,2) BETWEEN '01' AND '31'
+                        THEN SUBSTR(sold_date,1,7) || '-01' ELSE sold_date END AS period,
+                        type, rep1, SUM(amount) AS amount
+                    FROM sales
+                    GROUP BY 1,2,3
+                    ORDER BY 1,2,3
+                """).fetchall()
             finally:
                 con.close()
-        return {"sales": [{"soldDate": r[0] or "", "type": r[1] or "",
-                           "rep1": r[2] or "", "amount": r[3] or 0} for r in rows],
-                "revision": revision}
+            result = {"sales": [{"soldDate": r[0] or "", "type": r[1] or "",
+                                 "rep1": r[2] or "", "amount": r[3] or 0} for r in rows],
+                      "revision": revision}
+            self._annual_cache = result
+            return result
 
     def get_stats_context(self, start="", end=""):
         """返回报表所需的全部数据。走 HTTP+gzip，不再经过 pywebview 桥(原卡死根因)。"""
