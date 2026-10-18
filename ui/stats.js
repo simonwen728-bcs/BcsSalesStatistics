@@ -1566,7 +1566,7 @@ window.STATS = (function () {
     if (!customers.length) return { error: 'NO_CUSTOMERS' };
     // 模糊查询（可选）：客户/销售/城市，命中=子串包含（不区分大小写）；不填=全部客户。
     // 本报表不受起始时间限制：时间窗只用于 Active/Sleeping/New 的状态判定，行集始终是全部客户。
-    const fCust = String(opts.fCust || '').trim().toLowerCase();
+    const fCust = ['sales1','city','customertype'].includes(mode) ? '' : String(opts.fCust || '').trim().toLowerCase();
     const fSales = String(opts.fSales || '').trim().toLowerCase();
     const fCity = String(opts.fCity || '').trim().toLowerCase();
     const hit = (v, q) => !q || String(v || '').toLowerCase().includes(q);
@@ -1592,8 +1592,8 @@ window.STATS = (function () {
     // 近期窗口=数据最后月份往前 6 个月（用户口径，考虑数据滞后：以数据内最后日期为基准，非今天）。
     // 例：数据到 2026-08 → 窗口 2026-03-01 ~ 2026-08-31；Active 默认窗口与 Sleeping 判定都用它。
     const systemRecentStart = monthStart(sysY, sysM, 5);
-    const activeStart = opts.start || systemRecentStart;
-    const activeEnd = opts.end || monthEnd(sysY, sysM);
+    const activeStart = systemRecentStart;
+    const activeEnd = monthEnd(sysY, sysM);
     if (activeStart > activeEnd) return { error: 'BAD_ORDER' };
     // New=数据最后月份往前 3 个完整月（同样以数据末月为基准）。例：数据到 2026-08 → 2026-06-01 ~ 2026-08-31
     const newEnd = monthEnd(Number(activeEnd.slice(0, 4)), Number(activeEnd.slice(5, 7)));
@@ -1759,7 +1759,11 @@ window.STATS = (function () {
     const windowText = mode === 'sleeping' ? 'Sleeping Window: ' + systemRecentStart + ' - ' + latest
       : mode === 'never' ? 'System History: ' + (earliest || '') + ' - ' + latest
       : mode === 'new' ? 'New Account Window: ' + newStart + ' - ' + newEnd
-      : 'Active: ' + activeStart + ' - ' + activeEnd + ' | New: ' + newStart + ' - ' + newEnd + ' | Sleeping Window: ' + systemRecentStart + ' - ' + latest;
+      : 'New: ' + newStart + ' - ' + newEnd + ' | Sleeping Window: ' + systemRecentStart + ' - ' + latest;
+    if(mode==='never') {
+      spec.values=spec.values.map(r=>r.slice(0,5));
+      spec.numFmt=[];spec.align=[];
+    }
     spec.info = windowText;
     spec.summary = [
       ['Total', summary.total], ['Active', summary.active], ['Sleeping', summary.sleeping],

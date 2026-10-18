@@ -1170,6 +1170,83 @@
   // Default report conventions: identifiers/counts/ratios 100 centered,
   // customer names 300 left, money 150 right, headers centered, row height 30.
   const REPORT_DEFAULT_LAYOUT = Object.freeze({compact:100,customerName:300,money:150,rowHeight:30});
+  const CUSTOMER_BATCH_IDS=['customerType','salesAccount','actDetail','actBySales1','actByCity','actByType','actSleeping','actReact','actNever','actNew'];
+  const CUSTOMER_BATCH_SHEETS=['客户类型统计','客户开户统计','客户活跃统计','活跃-按销售1','活跃-按城市','活跃-按客户类型','沉睡客户','沉睡客户唤醒统计','从未购买','新开户'];
+  async function customerBatchContext(opts, knownRevision) {
+    const key=JSON.stringify([opts.start || '',opts.end || '']);
+    const cached=S.customerBatchSource && S.customerBatchSource.key===key ? S.customerBatchSource.ctx : null;
+    const result=await normalizeCtx(await api('get_customer_reports_context',opts.start || '',opts.end || '',knownRevision || (cached && cached.revision) || ''));
+    if(result.unchanged) {
+      if(knownRevision && result.revision===knownRevision) return result;
+      if(cached && cached.revision===result.revision) return cached;
+      throw new Error('Customer source cache is unavailable');
+    }
+    S.customerBatchSource={key,ctx:result};
+    return result;
+  }
+  function renderCustomerBatchTemplate(spec,sh,values,off) {
+    const key=String(spec.sheet),nr=values.length,nc=spec.values[0].length;
+    const grouped=key.startsWith('活跃-'),type=key==='客户类型统计',account=key==='客户开户统计';
+    const sleeping=key==='沉睡客户',react=key==='沉睡客户唤醒统计',never=key==='从未购买',fresh=key==='新开户';
+    const widths=Array.from({length:nc},(_,c)=>type ? (c===0?250:200) : account ? (c===0?200:100) : grouped ? (c===0?200:c>=9?150:100) : never ? (c===0?100:c===1?300:120) : react ? (c===1?250:c===8?150:100) : sleeping ? (c===1?250:[2,3,5].includes(c)?150:100) : fresh ? (c===1?300:c===5?150:100) : (c===1?300:[2,5].includes(c)?180:c===0?100:150));
+    const left=type || account || grouped ? [0] : sleeping ? [1,2,3] : [1];
+    const right=type ? [1] : grouped ? [9,10] : account || never ? [] : react ? [8] : [5];
+    // Version the defaults once; subsequent manual edits remain editable and remembered.
+    S.customerBatchLayouts=S.customerBatchLayouts || {};
+    if(!S.customerBatchLayouts[key]) {
+      delete S.userStyles[key];delete S.sheetLayouts[key];S.customerBatchLayouts[key]=1;
+      trackSave(api('set_pref','customerBatchLayouts',JSON.stringify(S.customerBatchLayouts)));
+      trackSave(api('set_pref','userStyles',JSON.stringify(S.userStyles)));
+      trackSave(api('set_pref','sheetLayouts',JSON.stringify(S.sheetLayouts)));
+    }
+    const user=S.userStyles[key] || {},lay=S.sheetLayouts[key] || {},baseline={},formats=[];
+    const col=v=>[...v].reduce((a,c)=>a*26+c.charCodeAt(0)-64,0)-1;
+    (spec.numFmt || []).forEach(f=>{
+      const m=/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/.exec(f.range);
+      if(m) formats.push({r0:+m[2]-1+off,r1:+m[4]-1+off,c0:col(m[1]),c1:col(m[3]),pattern:zhFmt(f.fmt.includes('%')?'0.00%':f.fmt)});
+    });
+    const matrix=values.map((row,r)=>Array.from({length:nc},(_,c)=>{
+      const header=r===off,total=/^(Grand Total|Total|合计)$/.test(String(row[0] || ''));
+      const st={bl:r===0 || header || total?1:0,vt:2,ht:r<off?1:header?2:left.includes(c)?1:right.includes(c)?3:2};
+      if(header || total) st.bg={rgb:'#d9eaf7'};
+      const f=formats.find(f=>r>=f.r0 && r<=f.r1 && c>=f.c0 && c<=f.c1);if(f) st.n={pattern:f.pattern};
+      Object.assign(st,user[r+':'+c] || {});
+      if(r<300) baseline[r+':'+c]=st;
+      return {v:row[c]===0 || row[c]===undefined?'':row[c],s:st};
+    }));
+    sh.getMergeData().forEach(r=>r.breakApart());
+    sh.getRange(0,0,nr,nc).setValues(matrix);
+    if(off) {sh.getRange(0,0,1,nc).merge();sh.getRange(1,0,1,nc).merge();}
+    widths.forEach((w,c)=>{if(lay.w && lay.w[c]>0) widths[c]=lay.w[c];sh.setColumnWidth(c,widths[c]);});
+    sh.showRows(0,nr);sh.setRowHeights(0,nr,30);
+    const heights={};Object.entries(lay.h || {}).forEach(([r,h])=>{if(+r<nr && h>=10){sh.setRowHeight(+r,h);heights[r]=h;}});
+    const fz=lay.fz || {y:off+1,x:grouped?1:0};sh.setFrozenRows(fz.y || 0);sh.setFrozenColumns(fz.x || 0);
+    S.appliedLayouts[key]={w:widths,h:heights,fz};S.appliedStyles[key]=baseline;
+    S.sheetExtent=S.sheetExtent || {};S.sheetExtent[key]={rows:nr,cols:nc};S.lastRenderedSheet=key;
+    sh.activate();try{window.dispatchEvent(new Event('resize'));}catch(e){}
+  }
+
+  function renderSalesQueryTemplate(spec,sh) {
+    const key=String(spec.sheet),nr=spec.values.length,nc=16,baseline={};
+    const widths=[100,100,300,120,120,120,120,100,300,100,200,100,200,100,150,150];
+    const matrix=spec.values.map((row,r)=>Array.from({length:nc},(_,c)=>{
+      const st={bl:r===0?1:0,vt:2,ht:r===0?2:[2,3,4,8,10,12].includes(c)?1:c>=14?3:2};
+      if(r===0) st.bg={rgb:'#d9eaf7'};
+      if(r>0 && c>=13) st.n={pattern:zhFmt(c===13?'#,##0':'#,##0.00')};
+      if(r<300) baseline[r+':'+c]=st;
+      return {v:row[c]===undefined || row[c]===null?'':row[c],s:st};
+    }));
+    sh.getMergeData().forEach(r=>r.breakApart());
+    sh.getRange(0,0,nr,nc).setValues(matrix);
+    widths.forEach((w,c)=>sh.setColumnWidth(c,w));
+    sh.showRows(0,nr);sh.setRowHeights(0,nr,30);
+    sh.setFrozenRows(1);sh.setFrozenColumns(0);
+    S.appliedLayouts[key]={w:widths,h:{},fz:{y:1,x:0}};S.appliedStyles[key]=baseline;
+    S.sheetExtent=S.sheetExtent || {};S.sheetExtent[key]={rows:nr,cols:nc};
+    S.lastRenderedSheet=key;sh.activate();
+    try{window.dispatchEvent(new Event('resize'));}catch(e){}
+  }
+
   function renderCustomerStatsTemplate(spec, sh) {
     const key=String(spec.sheet),nr=spec.values.length,nc=spec.values[0].length;
     const money=[4,7,12],pct=[5,8,10,13,15],baseline={};
@@ -1357,6 +1434,10 @@
     try {
       if (sh.getMaxRows() < need) sh.insertRows(sh.getMaxRows(), need - sh.getMaxRows());
     } catch (e) { /* ignore */ }
+    if(spec.salesQueryTemplate) {renderSalesQueryTemplate(spec,sh);return;}
+    if (CUSTOMER_BATCH_SHEETS.includes(spec.sheet)) {
+      renderCustomerBatchTemplate(spec,sh,values,off);return;
+    }
     if (spec.sheet === '客户统计' && !off) {
       renderCustomerStatsTemplate(spec, sh);
       return;
@@ -1597,7 +1678,7 @@
     }
     if (def.fields.includes('actf')) {
       // 客户活跃统计系列：客户/销售/城市模糊查询（可留空=全部）；无时间段（始终统计全部客户）
-      fields.push({ key: 'fCust', label: t('custNo'), type: 'combo', fuzzy: 'customers', value: '' });
+      if(!['actBySales1','actByCity','actByType'].includes(def.id)) fields.push({ key: 'fCust', label: t('custNo'), type: 'combo', fuzzy: 'customers', value: '' });
       fields.push({ key: 'fSales', label: t('colRep1'), type: 'combo', fuzzy: 'rep1', value: '' });
       fields.push({ key: 'fCity', label: t('dlgCity'), type: 'combo', fuzzy: 'cities', value: '' });
     }
@@ -1634,6 +1715,9 @@
 
   async function runStatInner(def, opts, btn) {
     // 计时埋点：取数/计算/渲染 三段耗时写进状态栏（排查“统计要一分钟以上”用）
+    if(def.id.startsWith('act')) {opts=Object.assign({},opts,{start:'',end:''});
+      if(['actBySales1','actByCity','actByType'].includes(def.id)) opts.fCust='';
+    }
     const pf0 = performance.now();
     const annualNow = new Date();
     const annualWindow = annualNow.getFullYear() + '-' + annualNow.getMonth();
@@ -1663,7 +1747,11 @@
     const priorCustomerStats=def.id==='customerStats' ? S.statResults[def.id] : null;
     const reusableCustomerStats=priorCustomerStats && !priorCustomerStats.saveFailed && priorCustomerStats.customerStatsAlgorithm===1 && priorCustomerStats.customerStatsRange===customerStatsRange;
     const knownCustomerStatsRevision=reusableCustomerStats ? priorCustomerStats.dataRevision || '' : '';
-    const priorFast = reusableAnnual ? priorAnnual : reusablePerformance ? priorPerformance : reusableOrders ? priorOrders : reusableCategory ? priorCategory : reusableHistory ? priorHistory : reusableCustomerStats ? priorCustomerStats : null;
+    const batchRange=JSON.stringify([opts.start || '',opts.end || '',opts.fCust || '',opts.fSales || '',opts.fCity || '']);
+    const priorBatch=CUSTOMER_BATCH_IDS.includes(def.id) ? S.statResults[def.id] : null;
+    const reusableBatch=priorBatch && !priorBatch.saveFailed && priorBatch.customerBatchAlgorithm===1 && priorBatch.customerBatchRange===batchRange;
+    const knownBatchRevision=reusableBatch ? priorBatch.dataRevision || '' : '';
+    const priorFast = reusableAnnual ? priorAnnual : reusablePerformance ? priorPerformance : reusableOrders ? priorOrders : reusableCategory ? priorCategory : reusableHistory ? priorHistory : reusableCustomerStats ? priorCustomerStats : reusableBatch ? priorBatch : null;
     S.ctxCache = null; // 每次重新生成都读取最新数据，避免把旧缓存保存成新报表。
     const ctx = getCtx(opts.start, opts.end) || await (async () => {
       const c = await normalizeCtx(def.id === 'annual' ? await api('get_annual_context', knownAnnualRevision) :
@@ -1672,8 +1760,9 @@
         def.id === 'categoryQuery' ? await api('get_category_context', opts.start || '', opts.end || '', knownCategoryRevision) :
         def.id === 'salesHistory' ? await api('get_history_context', opts.start || '', opts.end || '', {custNo:opts.custNo,itemNo:opts.itemNo,invoice:opts.invoice,sales:opts.sales}, knownHistoryRevision) :
         def.id === 'customerStats' ? await api('get_customer_stats_context', opts.start || '', opts.end || '', knownCustomerStatsRevision) :
+        CUSTOMER_BATCH_IDS.includes(def.id) ? await customerBatchContext(opts,knownBatchRevision) :
         await api('get_stats_context', opts.start || '', opts.end || ''));
-      if (!['annual', 'salesPerformance', 'customerOrders', 'categoryQuery', 'salesHistory', 'customerStats'].includes(def.id)) putCtx(opts.start || '', opts.end || '', c);
+      if (!CUSTOMER_BATCH_IDS.includes(def.id) && !['annual', 'salesPerformance', 'customerOrders', 'categoryQuery', 'salesHistory', 'customerStats'].includes(def.id)) putCtx(opts.start || '', opts.end || '', c);
       return c;
     })();
     const pf1 = performance.now();
@@ -1746,6 +1835,9 @@
       spec.dataRevision = revision;
       spec.annualWindow = annualWindow;
       spec.annualAlgorithm = 2;
+    }
+    if (CUSTOMER_BATCH_IDS.includes(def.id)) {
+      spec.dataRevision=revision;spec.customerBatchRange=batchRange;spec.customerBatchAlgorithm=1;
     }
     if (def.id === 'customerStats') {
       spec.dataRevision=revision;spec.customerStatsRange=customerStatsRange;spec.customerStatsAlgorithm=1;
@@ -2604,6 +2696,8 @@
     } catch (e) { /* ignore */ }
   }
   function highlightSheetRow(row) {
+    // Native cell/row selection is sufficient; do not persist selection as cell formatting.
+    if(S.sheetCtx && S.sheetCtx.kind==='sales') {S.lastHLRow=null;return;}
     if (S.lastHLRow != null && S.lastHLRow !== row) sheetRowBg(S.lastHLRow, null);
     S.lastHLRow = row;
     if (row != null && row >= 0) sheetRowBg(row, '#dbe9ff');
@@ -2711,6 +2805,7 @@
         return;
       }
     }
+    if(S.nav && S.nav.startsWith('r:')) return;
     const ctx = S.sheetCtx;
     if (!ctx || row === null || row === undefined || row < ctx.startRow) return;
     const idx = row - ctx.startRow;
@@ -2725,11 +2820,11 @@
   }
 
   let salesToken = 0;
-  async function renderSales() {
+  async function renderSales(force=false) {
+    const token = ++salesToken;
     const all = !S.pageSize;   // pageSize=0 = 加载全部
     const tk = 'sales:' + S.dataToken + ':' + JSON.stringify(S.salesFilters) + ':' + S.salesPage + ':' + (all ? 'all' : S.pageSize);
-    if (await activateIfFresh(t('tabSales'), tk)) { S.sheetCtx = S.sheetCtxCache[t('tabSales')] || null; return; }
-    const token = ++salesToken;
+    if (!force && await activateIfFresh(t('tabSales'), tk)) { S.sheetCtx = S.sheetCtxCache[t('tabSales')] || null; return; }
     let res;
     const ALL_CAP = 60000;   // 全部档上限（真实数据 5.35 万行全量可渲染）
     try {
@@ -2738,7 +2833,7 @@
     if (token !== salesToken) return;
     if (!res || !Array.isArray(res.rows)) { toast('Load error: bad response'); return; }
     const pages = all ? 1 : Math.max(1, Math.ceil(res.total / S.pageSize));
-    if (!all && S.salesPage >= pages) S.salesPage = pages - 1;
+    if (!all && S.salesPage >= pages) {S.salesPage=pages-1;return renderSales(true);}
     const start = all ? 0 : S.salesPage * S.pageSize;
     S.lastSalesTotal = res.total;
     $('#sales-info').textContent = res.total
@@ -2753,7 +2848,7 @@
     S.sheetCtx = { kind: 'sales', rows: res.rows, startRow: 1, colCount: SALES_COLS.length };
     S.sheetCtxCache[t('tabSales')] = S.sheetCtx;
     await renderSpec({
-      sheet: t('tabSales'), values,
+      sheet: t('tabSales'), values, salesQueryTemplate:true,
       numFmt: [
         { range: 'N2:N' + n, fmt: '#,##0' },
         { range: 'O2:P' + n, fmt: '#,##0.00' },
@@ -3640,7 +3735,7 @@
     attachFuzzy($('#f-rep1'), { fetch: fuzzyRep1 });
   }
   function bindToolbars() {
-    $('#sales-query').onclick = () => { collectSalesFilters(); S.salesPage = 0; renderSales(); };
+    $('#sales-query').onclick = () => { collectSalesFilters(); S.salesPage = 0; renderSales(true); };
     $('#sales-reset').onclick = () => {
       SALES_FILTER_INPUTS.forEach((id) => { $('#' + id).value = ''; });
       delete $('#f-custname').dataset.custNo;
@@ -3834,6 +3929,7 @@
         S.sheetLayouts = lay;
       } catch (e) { S.sheetLayouts = {}; }
     }
+    if(meta.prefs && meta.prefs.customerBatchLayouts) {try{S.customerBatchLayouts=JSON.parse(meta.prefs.customerBatchLayouts) || {};}catch(e){}}
     if (meta.prefs && meta.prefs.userStyles) {
       try { S.userStyles = JSON.parse(meta.prefs.userStyles) || {}; } catch (e) { S.userStyles = {}; }
     }
