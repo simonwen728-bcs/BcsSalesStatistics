@@ -400,8 +400,7 @@ window.STATS = (function () {
     spec.bold.push(rng(lastRow - 1, 1, lastRow, lastCol));
     spec.bg.push({ range: rng(lastRow - 1, 1, lastRow, lastCol), color: '#d9eaf7' });
     spec.freeze = { rows: 1, cols: 2 };
-    spec.widths = [[1, 150], [2, 180], [3, 150], [4, 150], [5, 150]];
-    for (let c = 6; c <= 12; c++) spec.widths.push([c, 160]);
+    spec.widths = Array.from({ length: lastCol }, (_, c) => [c + 1, [150, 150, 180, 100, 100, 150][c] || 150]);
     return spec;
   }
 

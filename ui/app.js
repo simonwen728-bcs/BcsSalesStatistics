@@ -1123,6 +1123,48 @@
       milliseconds: Math.round(performance.now() - started), bulkWrites: 1 };
   }
 
+  // 销售业绩固定模板：每个格子的样式一次合并，金额与末尾比例行分别处理。
+  function renderPerformanceTemplate(spec, sh) {
+    const nr = spec.values.length, nc = spec.values[0].length;
+    const key = String(spec.sheet);
+    const user = S.userStyles[key] || {};
+    const styles = Array.from({ length: nr }, () => Array.from({ length: nc }, () => ({})));
+    const eachRange = (range, fn) => {
+      const m = /^([A-Z]+)(\d+):([A-Z]+)(\d+)$/.exec(range);
+      if (!m) return;
+      const col = (v) => [...v].reduce((a,c) => a*26+c.charCodeAt(0)-64,0)-1;
+      for (let r=+m[2]-1; r<Math.min(+m[4],nr); r++)
+        for (let c=col(m[1]); c<=Math.min(col(m[3]),nc-1); c++) fn(styles[r][c]);
+    };
+    (spec.bold || []).forEach((range) => eachRange(range, (st) => { st.bl=1; }));
+    (spec.bg || []).forEach((b) => eachRange(b.range, (st) => { st.bg={rgb:b.color}; }));
+    (spec.numFmt || []).forEach((f) => eachRange(f.range, (st) => { st.n={pattern:zhFmt(f.fmt)}; }));
+    const baseline = {};
+    const matrix = spec.values.map((row,r) => Array.from({length:nc},(_,c) => {
+      const fixed=styles[r][c];
+      const st=Object.assign({bl:0},fixed,user[r+':'+c] || {});
+      if (fixed.n) st.n=fixed.n;
+      const percent=!!(fixed.n && fixed.n.pattern.includes('%'));
+      st.ht=r===0 ? 2 : [0,1,5].includes(c) ? 1 : percent ? 2 : 3;
+      if(r===0) st.cl={rgb:'#ffffff'};
+      baseline[r+':'+c]=st;
+      return {v:row[c]===0 || row[c]===undefined ? '' : row[c],s:st};
+    }));
+    sh.getRange(0,0,nr,nc).setValues(matrix);
+    const widths=Array.from({length:nc},(_,c)=>[150,150,180,100,100,150][c] || 150);
+    widths.forEach((w,c)=>sh.setColumnWidth(c,w));
+    sh.showRows(0,nr);
+    sh.setRowHeights(0,nr,30);
+    sh.setFrozenRows(1); sh.setFrozenColumns(2);
+    S.appliedLayouts[key]={w:widths,h:{},fz:{y:1,x:2}};
+    S.appliedStyles[key]=baseline;
+    S.sheetExtent=S.sheetExtent || {};
+    S.sheetExtent[key]={rows:nr,cols:nc};
+    S.lastRenderedSheet=key;
+    sh.activate();
+    try { window.dispatchEvent(new Event('resize')); } catch(e) { /* ignore */ }
+  }
+
   async function renderSpecInnerBody(spec) {
     placeMount();
     // 每个功能拥有自己的工作表：按 spec.sheet 找表（无则新建），原地清空重写，不影响其他功能的表
@@ -1214,6 +1256,10 @@
     try {
       if (sh.getMaxRows() < need) sh.insertRows(sh.getMaxRows(), need - sh.getMaxRows());
     } catch (e) { /* ignore */ }
+    if (spec.sheet === '销售业绩' && !off) {
+      renderPerformanceTemplate(spec, sh);
+      return;
+    }
     if (spec.yearGroups && !off) {
       renderAnnualTemplate(spec, sh);
       return;
@@ -1482,26 +1528,34 @@
     const reusableAnnual = priorAnnual && !priorAnnual.saveFailed &&
       priorAnnual.annualAlgorithm === 2 && priorAnnual.annualWindow === annualWindow;
     const knownAnnualRevision = reusableAnnual ? priorAnnual.dataRevision || '' : '';
+    const performanceRange = JSON.stringify([opts.start || '', opts.end || '']);
+    const priorPerformance = def.id === 'salesPerformance' ? S.statResults[def.id] : null;
+    const reusablePerformance = priorPerformance && !priorPerformance.saveFailed &&
+      priorPerformance.performanceAlgorithm === 1 && priorPerformance.performanceRange === performanceRange;
+    const knownPerformanceRevision = reusablePerformance ? priorPerformance.dataRevision || '' : '';
+    const priorFast = reusableAnnual ? priorAnnual : reusablePerformance ? priorPerformance : null;
     S.ctxCache = null; // 每次重新生成都读取最新数据，避免把旧缓存保存成新报表。
     const ctx = getCtx(opts.start, opts.end) || await (async () => {
-      const c = await normalizeCtx(def.id === 'annual' ? await api('get_annual_context', knownAnnualRevision) : await api('get_stats_context', opts.start || '', opts.end || ''));
-      if (def.id !== 'annual') putCtx(opts.start || '', opts.end || '', c);
+      const c = await normalizeCtx(def.id === 'annual' ? await api('get_annual_context', knownAnnualRevision) :
+        def.id === 'salesPerformance' ? await api('get_performance_context', opts.start || '', opts.end || '', knownPerformanceRevision) :
+        await api('get_stats_context', opts.start || '', opts.end || ''));
+      if (!['annual', 'salesPerformance'].includes(def.id)) putCtx(opts.start || '', opts.end || '', c);
       return c;
     })();
     const pf1 = performance.now();
     const revision = ctx && ctx.revision;
-    if (def.id === 'annual' && ctx && ctx.unchanged && reusableAnnual) {
-      priorAnnual.stale = false;
-      if (!await activateIfFresh(priorAnnual.sheet, 'stat:' + S.dataToken)) {
-        await renderSpec(priorAnnual);
-        S.sheetToken[priorAnnual.sheet] = 'stat:' + S.dataToken;
+    if (ctx && ctx.unchanged && priorFast) {
+      priorFast.stale = false;
+      if (!await activateIfFresh(priorFast.sheet, 'stat:' + S.dataToken)) {
+        await renderSpec(priorFast);
+        S.sheetToken[priorFast.sheet] = 'stat:' + S.dataToken;
       }
-      S.yearToggle = { sheet: priorAnnual.sheet, groups: priorAnnual.yearGroups };
+      S.yearToggle = priorFast.yearGroups ? { sheet: priorFast.sheet, groups: priorFast.yearGroups } : null;
       renderStatExtra(def);
       const elapsed = ((performance.now() - pf0) / 1000).toFixed(1);
       const st = document.getElementById('stat-state');
-      if (st) st.textContent = reportState(priorAnnual) + (LANG === 'zh' ? ' · 数据未变，复用结果 · 总计 ' : ' · Data unchanged, reused · Total ') + elapsed + 's';
-      toast(LANG === 'zh' ? '数据未变化，已显示保存的年度报表。' : 'Data unchanged. Showing saved annual report.');
+      if (st) st.textContent = reportState(priorFast) + (LANG === 'zh' ? ' · 数据未变，复用结果 · 总计 ' : ' · Data unchanged, reused · Total ') + elapsed + 's';
+      toast(LANG === 'zh' ? '数据未变化，已显示保存的报表。' : 'Data unchanged. Showing saved report.');
       return;
     }
     if (!ctx || !ctx.sales || !ctx.sales.length) {
@@ -1554,6 +1608,11 @@
       spec.dataRevision = revision;
       spec.annualWindow = annualWindow;
       spec.annualAlgorithm = 2;
+    }
+    if (def.id === 'salesPerformance') {
+      spec.dataRevision = revision;
+      spec.performanceRange = performanceRange;
+      spec.performanceAlgorithm = 1;
     }
     S.yearToggle = spec.yearGroups ? { sheet: spec.sheet, groups: spec.yearGroups } : null;
     spec.stale = false;
