@@ -2654,7 +2654,7 @@
     const finalWidths=engKey==='list'?[100,400,150,80,80]:[100,200,200,200,100,100,200,200,200];
     finalWidths.forEach((w,c)=>sh.setColumnWidth(c,w));
     sh.setRowHeights(0,matrix.length,30);
-    if(engKey==='ana')sh.setRowHeight(13,44); // reserved space beneath fixed summary
+    if(engKey==='ana')sh.setRowHeight(13,30);
     const appliedH = {};
     if (savedLay && savedLay.h) {
       Object.entries(savedLay.h).forEach(([ri, h]) => {
@@ -2723,66 +2723,41 @@
       });
       S.dash.monthTotal=[t('total'),tt,tc,ts];
     }
-    const nR = 13; // one fixed header plus twelve detail rows; summary is pinned separately
+    const nR = 13; // header plus twelve detail rows; append a normal summary row below
     const values = [];
     for (let i = 0; i < nR; i++) values.push(['', '', '', '', '', '', '', '', '']);   // A..I（E 列空档）
     yearRows.forEach((r, i) => { for (let c = 0; c < 4; c++) values[i][c] = r[c]; });
     monthRows.forEach((r, i) => { for (let c = 0; c < 4; c++) values[i][5 + c] = r[c]; });
+    values.push([...S.dash.yearTotal,'',...S.dash.monthTotal]);
     const spec = { sheet: '客户动态分析', values, numFmt: [], bold: [], bg: [], freeze: { rows: 1, cols: 0 } };
     const money = '#,##0.00;-#,##0.00;';
-    if (yearRows.length > 1) spec.numFmt.push({ range: 'B2:D' + yearRows.length, fmt: money });
-    if (monthRows.length > 1) spec.numFmt.push({ range: 'G2:I' + monthRows.length, fmt: money });
+    spec.numFmt.push({ range: 'B2:D14', fmt: money });
+    spec.numFmt.push({ range: 'G2:I14', fmt: money });
     spec.bg.push({ range: 'A1:D1', color: '#d9eaf7' }, { range: 'F1:I1', color: '#d9eaf7' });
+    spec.bg.push({range:'A14:I14',color:'#d9e6f3'});
+    spec.bold.push('A14:I14');
 
-    await renderDashSheet('ana', spec);
-    renderDashTotals();
+    renderDashAnalysisTable(spec);
+    document.getElementById('dash-fixed-totals')?.remove();
   }
 
-  let dashTotalsTimer=null;
-  function renderDashTotals() {
-    let footer=document.getElementById('dash-fixed-totals');
-    if(!footer){
-      footer=document.createElement('div');footer.id='dash-fixed-totals';
-      // Overlay inside the sheet viewport, above its horizontal scrollbar.
-      // Extra blank worksheet rows keep the last data row reachable by scrolling.
-      footer.style.cssText='height:30px;overflow:hidden;position:absolute;top:auto;left:0;right:14px;bottom:14px;z-index:30;background:#d9e6f3;border-top:1px solid #b5c7db;pointer-events:none';
-      $('#dash-ana-box').appendChild(footer);
-    }
-    const vals=[...(S.dash.yearTotal || []),'',...(S.dash.monthTotal || [])];
-    footer.innerHTML=vals.map((v,i)=>'<div data-total-col="'+i+'" style="visibility:hidden;position:absolute;top:0;height:30px;line-height:30px;padding:0 6px;box-sizing:border-box;border-right:1px solid #a7b7ca;border-bottom:1px solid #a7b7ca;font-weight:bold;white-space:nowrap;text-align:'+([0,4,5].includes(i)?'center':'right')+'">'+esc(typeof v==='number'?fmtMoney(v):v)+'</div>').join('');
-    const update=()=>{
-      if(S.nav!=='dashboard' || !S.dashEngines)return;
-      try{
-        const wb=S.dashEngines.ana.api.getActiveWorkbook(),sh=wb.getSheets().find(x=>x.getSheetName()==='客户动态分析');if(!sh)return;
-        // A workbook contains editor/measurement canvases as well as the grid.
-        // The first canvas can be offscreen: anchor to the visible grid instead.
-        const mount=document.getElementById('dashAnaMount'),mr=mount.getBoundingClientRect();
-        const canvas=[...mount.querySelectorAll('canvas')].filter(c=>{
-          const r=c.getBoundingClientRect();
-          return c.clientWidth>0 && c.clientHeight>0 && r.right>mr.left && r.left<mr.right && r.bottom>mr.top && r.top<mr.bottom;
-        }).sort((a,b)=>b.clientWidth*b.clientHeight-a.clientWidth*a.clientHeight)[0];
-        if(!canvas)return;
-        const cr=canvas.getBoundingClientRect(),fr=footer.getBoundingClientRect();
-        const cssScale=footer.offsetWidth ? fr.width/footer.offsetWidth : 1;
-        const canvasScale=cr.width/canvas.clientWidth;
-        const zoom=sh.getSheet().getZoomRatio() || 1,scroll=wb.getScrollStateBySheetId(sh.getSheetId()) || {};
-        // This bundled Univer version returns a starting column + pixel offset,
-        // not viewportScrollX. Convert that state to worksheet coordinates.
-        const first=sh.getRange(0,0,1,1).getCellRect();
-        const startCol=Math.max(0,Number(scroll.sheetViewStartColumn)||0);
-        const sx=sh.getRange(0,startCol,1,1).getCellRect().left-first.left+(Number(scroll.offsetX)||0);
-        const scale=zoom*canvasScale/cssScale,origin=(cr.left-fr.left)/cssScale;
-        const gridLeft=origin+sh.getRange(0,0,1,1).getCellRect().left*scale;
-        for(const el of footer.children){
-          const r=sh.getRange(0,Number(el.dataset.totalCol),1,1).getCellRect();
-          const left=origin+(r.left-sx)*scale,width=r.width*scale;
-          el.style.left=left+'px';el.style.width=width+'px';
-          el.style.clipPath='inset(0 0 0 '+Math.max(0,Math.min(width,gridLeft-left))+'px)';
-          el.style.visibility='visible';
-        }
-      }catch(e){ /* initial workbook layout may still be pending */ }
-    };
-    if(dashTotalsTimer)clearInterval(dashTotalsTimer);dashTotalsTimer=setInterval(update,100);update();
+  // One native table owns all column widths and both scroll axes. Sticky cells
+  // pin the header/footer vertically without independent horizontal positioning.
+  function renderDashAnalysisTable(spec) {
+    const box=document.getElementById('dash-ana-box');
+    const mount=document.getElementById('dashAnaMount');
+    if(mount)mount.style.display='none';
+    let view=document.getElementById('dash-analysis-table');
+    if(!view){view=document.createElement('div');view.id='dash-analysis-table';box.appendChild(view);}
+    const x=view.scrollLeft,y=view.scrollTop;
+    const widths=[100,200,200,200,100,100,200,200,200];
+    const row=(values,header=false)=>'<tr>'+values.map((v,c)=>{
+      const tag=header?'th':'td',center=header || [0,4,5].includes(c);
+      const value=typeof v==='number'?(v===0?'':fmtMoney(v)):v;
+      return '<'+tag+' style="text-align:'+(center?'center':'right')+'">'+esc(value==null?'':value)+'</'+tag+'>';
+    }).join('')+'</tr>';
+    view.innerHTML='<table aria-label="'+esc(t('dashAnalysis'))+'" style="width:'+widths.reduce((a,b)=>a+b,0)+'px"><colgroup>'+widths.map(w=>'<col style="width:'+w+'px">').join('')+'</colgroup><thead>'+row(spec.values[0],true)+'</thead><tbody>'+spec.values.slice(1,-1).map(r=>row(r)).join('')+'</tbody><tfoot>'+row(spec.values[spec.values.length-1])+'</tfoot></table>';
+    view.scrollLeft=x;view.scrollTop=y;
   }
 
   function renderDashChart() {

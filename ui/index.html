@@ -263,6 +263,11 @@
     /* 面板内隐藏公式栏/页签栏；工具栏保留（用户要能在面板里设置单元格样式） */
     #dashListMount .univer-formula-box, #dashListMount .univer-sheet-bar,
     #dashAnaMount .univer-formula-box, #dashAnaMount .univer-sheet-bar { display: none !important; }
+    #dash-analysis-table { position:absolute; inset:0; overflow:auto; background:#fff; }
+    #dash-analysis-table table { table-layout:fixed; border-collapse:separate; border-spacing:0; font:14px Arial,sans-serif; color:#182330; }
+    #dash-analysis-table th, #dash-analysis-table td { height:30px; box-sizing:border-box; padding:0 6px; white-space:nowrap; overflow:hidden; border-right:1px solid #b8c4d2; border-bottom:1px solid #b8c4d2; background:#fff; }
+    #dash-analysis-table thead th { position:sticky; top:0; z-index:2; background:#d9eaf7; font-weight:700; }
+    #dash-analysis-table tfoot td { position:sticky; bottom:0; z-index:2; background:#d9e6f3; font-weight:700; border-top:1px solid #a7b7ca; }
     #dash-chart { flex: 1 1 auto; min-height: 0; }
     .seg { display: flex; gap: 4px; }
     /* ===== modal & toast ===== */
