@@ -811,7 +811,7 @@
     });
     univer.registerPlugin(UniverRenderEnginePlugin);
     univer.registerPlugin(UniverFormulaEnginePlugin);
-    univer.registerPlugin(UniverUIPlugin, { container: containerId });
+    univer.registerPlugin(UniverUIPlugin, { container: containerId, footer: !['dashListMount', 'dashAnaMount'].includes(containerId) });
     univer.registerPlugin(UniverDocsPlugin);
     univer.registerPlugin(UniverDocsUIPlugin);
     univer.registerPlugin(UniverSheetsPlugin);

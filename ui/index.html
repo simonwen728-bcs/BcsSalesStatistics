@@ -251,7 +251,10 @@
     #dash-analysis-panel { flex: 0 0 45%; }
     #dash-chart-panel { flex: 1 1 auto; }
     .panel-title { flex: none; padding: 8px 12px; font-weight: 600; font-size: 12.5px; background: #eef3fb; color: #2c3e57; }
-    .dash-head-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+    .dash-head-row { display: grid; grid-template-columns: 34% minmax(0, 1fr); align-items: center; gap: 10px; padding: 8px 0; }
+    .dash-head-row > .dash-cond-group { padding: 0 10px; box-sizing: border-box; justify-content: flex-start; }
+    .dash-head-row > .dash-cond-group:last-child { flex-wrap: nowrap; }
+    .dash-head-row > .dash-cond-group:last-child > [data-i18n] { flex: none; }
     .dash-range { display: flex; align-items: center; font-weight: 400; font-size: 12px; color: #44536a; }
     .dash-cust { font-weight: 600; color: #1f4e78; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .dash-mount-box { flex: 1 1 auto; min-height: 0; position: relative; }
