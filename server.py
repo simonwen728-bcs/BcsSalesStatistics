@@ -630,6 +630,44 @@ class Api:
             self._customer_reports_cache = (key, result)
             return result
 
+    def get_product_context(self, start="", end="", known_revision=""):
+        where, params = [], []
+        if start:
+            where.append("sold_date >= ?"); params.append(start)
+        if end:
+            where.append("sold_date <= ?"); params.append(end)
+        condition = " WHERE " + " AND ".join(where) if where else ""
+        with DB_LOCK:
+            con = connect()
+            try:
+                revision = read_data_revision(con)
+                if known_revision and known_revision == revision:
+                    return {"unchanged": True, "revision": revision}
+                key = (revision,start,end)
+                cached = getattr(self, "_product_context", None)
+                if cached and cached[0] == key:
+                    return cached[1]
+                rows = con.execute("SELECT sold_date,item_no,description,type,color,rep1,qty,amount FROM sales" +
+                                   condition + " ORDER BY sold_date,invoice,id",params).fetchall()
+                reps = {"s1": [row_to_rep(r) for r in con.execute(
+                    "SELECT * FROM reps WHERE kind='s1' AND (deleted IS NULL OR deleted=0) ORDER BY code")], "s2": []}
+                stock = [row_to_stock(r) for r in con.execute("SELECT * FROM stock ORDER BY item_no")]
+                result = {"cols": ["soldDate","itemNo","description","type","color","rep1","qty","amount"],
+                          "rows": [[r[i] or (0 if i>=6 else "") for i in range(8)] for r in rows],
+                          "reps": reps,"stock": stock,"revision":revision}
+                self._product_context = (key,result)
+                return result
+            finally:
+                con.close()
+
+    def get_product_types(self):
+        with DB_LOCK:
+            con = connect()
+            try:
+                return [r[0] for r in con.execute("SELECT DISTINCT type FROM sales WHERE type<>'' ORDER BY type")]
+            finally:
+                con.close()
+
     def get_history_context(self, start="", end="", filters=None, known_revision=""):
         """Lean history data; preserve original row order and JS report calculations."""
         filters = filters if isinstance(filters, dict) else {}
