@@ -1476,14 +1476,34 @@
   async function runStatInner(def, opts, btn) {
     // 计时埋点：取数/计算/渲染 三段耗时写进状态栏（排查“统计要一分钟以上”用）
     const pf0 = performance.now();
+    const annualNow = new Date();
+    const annualWindow = annualNow.getFullYear() + '-' + annualNow.getMonth();
+    const priorAnnual = def.id === 'annual' ? S.statResults[def.id] : null;
+    const reusableAnnual = priorAnnual && !priorAnnual.saveFailed &&
+      priorAnnual.annualAlgorithm === 2 && priorAnnual.annualWindow === annualWindow;
+    const knownAnnualRevision = reusableAnnual ? priorAnnual.dataRevision || '' : '';
     S.ctxCache = null; // 每次重新生成都读取最新数据，避免把旧缓存保存成新报表。
     const ctx = getCtx(opts.start, opts.end) || await (async () => {
-      const c = await normalizeCtx(def.id === 'annual' ? await api('get_annual_context') : await api('get_stats_context', opts.start || '', opts.end || ''));
+      const c = await normalizeCtx(def.id === 'annual' ? await api('get_annual_context', knownAnnualRevision) : await api('get_stats_context', opts.start || '', opts.end || ''));
       if (def.id !== 'annual') putCtx(opts.start || '', opts.end || '', c);
       return c;
     })();
     const pf1 = performance.now();
     const revision = ctx && ctx.revision;
+    if (def.id === 'annual' && ctx && ctx.unchanged && reusableAnnual) {
+      priorAnnual.stale = false;
+      if (!await activateIfFresh(priorAnnual.sheet, 'stat:' + S.dataToken)) {
+        await renderSpec(priorAnnual);
+        S.sheetToken[priorAnnual.sheet] = 'stat:' + S.dataToken;
+      }
+      S.yearToggle = { sheet: priorAnnual.sheet, groups: priorAnnual.yearGroups };
+      renderStatExtra(def);
+      const elapsed = ((performance.now() - pf0) / 1000).toFixed(1);
+      const st = document.getElementById('stat-state');
+      if (st) st.textContent = reportState(priorAnnual) + (LANG === 'zh' ? ' · 数据未变，复用结果 · 总计 ' : ' · Data unchanged, reused · Total ') + elapsed + 's';
+      toast(LANG === 'zh' ? '数据未变化，已显示保存的年度报表。' : 'Data unchanged. Showing saved annual report.');
+      return;
+    }
     if (!ctx || !ctx.sales || !ctx.sales.length) {
       // 区分「库里完全没有销售」和「所选时间段内没有销售」
       if (opts.start || opts.end) {
@@ -1530,6 +1550,11 @@
     spec.perf = { ctx: (pf1 - pf0) / 1000, calc: (pf2 - pf1) / 1000, render: (pf3 - pf2) / 1000 };
     try { console.info('[perf]', def.id, 'ctx=' + spec.perf.ctx.toFixed(2) + 's calc=' + spec.perf.calc.toFixed(2) + 's render=' + spec.perf.render.toFixed(2) + 's'); } catch (e) { /* ignore */ }
     spec.doneAt = now2();
+    if (def.id === 'annual') {
+      spec.dataRevision = revision;
+      spec.annualWindow = annualWindow;
+      spec.annualAlgorithm = 2;
+    }
     S.yearToggle = spec.yearGroups ? { sheet: spec.sheet, groups: spec.yearGroups } : null;
     spec.stale = false;
     const saveStarted = performance.now();
