@@ -11,6 +11,7 @@ Render 必须设置 DATABASE_URL；依赖见 requirements.txt。
 """
 import argparse
 import gzip
+import hashlib
 import io
 import json
 import os
@@ -684,6 +685,50 @@ class Api:
         return {"ok": True, "sales2Filled": filled, "newS1": new_s1, "newS2": new_s2,
                 "counts": counts}
 
+    # 每类报表保留最新快照；存于现有 prefs 表，随数据库备份一同保留。
+    def _report_revision(self):
+        digest = hashlib.sha256()
+        con = connect()
+        try:
+            for table, order in (("sales", "id"), ("customers", "no"),
+                                 ("stock", "item_no"), ("reps", "kind,code")):
+                digest.update(table.encode())
+                for row in con.execute("SELECT * FROM " + table + " ORDER BY " + order):
+                    digest.update(json.dumps(list(row), ensure_ascii=False, default=str).encode())
+        finally:
+            con.close()
+        return digest.hexdigest()
+
+    def get_report_revision(self):
+        with DB_LOCK:
+            return self._report_revision()
+
+    def save_report(self, report_id, spec, options, revision):
+        if not re.fullmatch(r"[A-Za-z0-9_]{1,60}", report_id or ""):
+            raise ValueError("Invalid report id")
+        if not isinstance(spec, dict) or not isinstance(spec.get("values"), list):
+            raise ValueError("Invalid report result")
+        with DB_LOCK:
+            stale = revision != self._report_revision()
+            record = {"spec": spec, "options": options, "revision": revision}
+            pref_set("report:" + report_id, json.dumps(record, ensure_ascii=False))
+        return {"ok": True, "stale": stale}
+
+    def load_reports(self):
+        with DB_LOCK:
+            revision = self._report_revision()
+            reports = {}
+            for key, value in prefs_load().items():
+                if not key.startswith("report:"):
+                    continue
+                try:
+                    record = json.loads(value)
+                    record["spec"]["stale"] = record.get("revision") != revision
+                    reports[key[7:]] = record
+                except (ValueError, TypeError, KeyError):
+                    continue
+        return {"ok": True, "reports": reports}
+
     # ---- meta / prefs ----
     def get_meta(self):
         with DB_LOCK:
@@ -704,7 +749,7 @@ class Api:
         for k in ("sheetLayouts", "userStyles", "navCollapsed", "sidebarCollapsed"):
             if k in meta and k not in prefs:
                 prefs[k] = meta[k]
-        meta["prefs"] = prefs
+        meta["prefs"] = {k: v for k, v in prefs.items() if not k.startswith("report:")}
         # lang 放顶层(前端直接读 meta.lang)
         if "lang" in prefs:
             meta["lang"] = prefs["lang"]
