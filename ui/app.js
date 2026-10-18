@@ -1284,8 +1284,22 @@
     Object.entries(userSt).forEach(([k, styleObj]) => {
       const parts = k.split(':');
       const ri = Number(parts[0]), ci = Number(parts[1]);
-      try { sh.getRange(ri, ci, 1, 1).setValues([[{ s: styleObj }]]); } catch (e) { /* ignore */ }
+      // 年度百分比是报表固定格式，不能被旧的用户样式（常规/小数）覆盖。
+      const annualPercent = spec.yearGroups && ri >= 1 && ci >= 5 && ci % 2 === 1;
+      const applied = annualPercent ? Object.assign({}, styleObj, { n: { pattern: '0.00%;-0.00%;' } }) : styleObj;
+      try { sh.getRange(ri, ci, 1, 1).setValues([[{ s: applied }]]); } catch (e) { /* ignore */ }
     });
+    if (spec.yearGroups) {
+      const styles = captureCellStyles(sh);
+      for (let ri = 1; ri < spec.values.length; ri++) {
+        for (let ci = 5; ci < spec.values[ri].length; ci += 2) {
+          const v = spec.values[ri][ci];
+          if (typeof v !== 'number') continue;
+          const style = Object.assign({}, styles[ri + ':' + ci] || {}, { n: { pattern: '0.00%;-0.00%;' } });
+          sh.getRange(ri, ci, 1, 1).setValues([[{ v: v === 0 ? '' : v, s: style }]]);
+        }
+      }
+    }
     S.appliedStyles[layKey] = captureCellStyles(sh);
     __t('replayUserFmt');   // 用户样式回放+基线+冻结合计
     // 激活目标表并强制视图重绑：页签栏已隐藏，切换渲染面只能靠程序保证（activate + resize）
@@ -2291,6 +2305,8 @@
   }
   // Keep display arrows out of spec.values so Excel export stays unchanged.
   function applyAnnualGroups(spec, sh) {
+    // 旧报表的隐藏行不能沿用到新行号；年份、TTM 和合计必须始终可见。
+    sh.showRows(0, spec.values.length);
     spec.yearGroups.forEach((g) => {
       if (!g.months || !g.months.length) return;
       if (typeof g.collapsed !== 'boolean') g.collapsed = true;
@@ -2300,6 +2316,7 @@
       g.label = String(spec.values[g.row - 1][0]);
       sh.getRange(g.row - 1, 0, 1, 1).setValues([[(g.collapsed ? '+ ' : '− ') + g.label]]);
     });
+    spec.yearGroups.forEach((g) => sh.showRows(g.row - 1, 1));
     S.yearToggle = { sheet: spec.sheet, groups: spec.yearGroups };
   }
 
