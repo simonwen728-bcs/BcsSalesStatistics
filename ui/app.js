@@ -1127,6 +1127,7 @@
   function renderPerformanceTemplate(spec, sh) {
     const nr = spec.values.length, nc = spec.values[0].length;
     const key = String(spec.sheet);
+    const isOrders = key === '客户订单统计';
     const user = S.userStyles[key] || {};
     const styles = Array.from({ length: nr }, () => Array.from({ length: nc }, () => ({})));
     const eachRange = (range, fn) => {
@@ -1145,18 +1146,19 @@
       const st=Object.assign({bl:0},fixed,user[r+':'+c] || {});
       if (fixed.n) st.n=fixed.n;
       const percent=!!(fixed.n && fixed.n.pattern.includes('%'));
-      st.ht=r===0 ? 2 : [0,1,5].includes(c) ? 1 : percent ? 2 : 3;
-      if(r===0) st.cl={rgb:'#ffffff'};
+      const isHeader = r===0 || (isOrders && row[0] === 'Sales 2' && row[1] === 'Sales Order');
+      st.ht=isHeader ? 2 : isOrders ? (c===0 ? 1 : [1,2,4,6,8].includes(c) ? 2 : 3) : [0,1,5].includes(c) ? 1 : percent ? 2 : 3;
+      if(isHeader) st.cl={rgb:'#ffffff'};
       baseline[r+':'+c]=st;
       return {v:row[c]===0 || row[c]===undefined ? '' : row[c],s:st};
     }));
     sh.getRange(0,0,nr,nc).setValues(matrix);
-    const widths=Array.from({length:nc},(_,c)=>[150,150,180,100,100,150][c] || 150);
+    const widths=Array.from({length:nc},(_,c)=>(isOrders ? [150,100,100,180,100,150,100,150,100] : [150,150,180,100,100,150])[c] || 150);
     widths.forEach((w,c)=>sh.setColumnWidth(c,w));
     sh.showRows(0,nr);
     sh.setRowHeights(0,nr,30);
-    sh.setFrozenRows(1); sh.setFrozenColumns(2);
-    S.appliedLayouts[key]={w:widths,h:{},fz:{y:1,x:2}};
+    sh.setFrozenRows(1); sh.setFrozenColumns(isOrders ? 0 : 2);
+    S.appliedLayouts[key]={w:widths,h:{},fz:{y:1,x:isOrders ? 0 : 2}};
     S.appliedStyles[key]=baseline;
     S.sheetExtent=S.sheetExtent || {};
     S.sheetExtent[key]={rows:nr,cols:nc};
@@ -1256,7 +1258,7 @@
     try {
       if (sh.getMaxRows() < need) sh.insertRows(sh.getMaxRows(), need - sh.getMaxRows());
     } catch (e) { /* ignore */ }
-    if (spec.sheet === '销售业绩' && !off) {
+    if (['销售业绩', '客户订单统计'].includes(spec.sheet) && !off) {
       renderPerformanceTemplate(spec, sh);
       return;
     }
@@ -1533,13 +1535,18 @@
     const reusablePerformance = priorPerformance && !priorPerformance.saveFailed &&
       priorPerformance.performanceAlgorithm === 1 && priorPerformance.performanceRange === performanceRange;
     const knownPerformanceRevision = reusablePerformance ? priorPerformance.dataRevision || '' : '';
-    const priorFast = reusableAnnual ? priorAnnual : reusablePerformance ? priorPerformance : null;
+    const priorOrders = def.id === 'customerOrders' ? S.statResults[def.id] : null;
+    const reusableOrders = priorOrders && !priorOrders.saveFailed &&
+      priorOrders.ordersAlgorithm === 1 && priorOrders.ordersRange === performanceRange;
+    const knownOrdersRevision = reusableOrders ? priorOrders.dataRevision || '' : '';
+    const priorFast = reusableAnnual ? priorAnnual : reusablePerformance ? priorPerformance : reusableOrders ? priorOrders : null;
     S.ctxCache = null; // 每次重新生成都读取最新数据，避免把旧缓存保存成新报表。
     const ctx = getCtx(opts.start, opts.end) || await (async () => {
       const c = await normalizeCtx(def.id === 'annual' ? await api('get_annual_context', knownAnnualRevision) :
         def.id === 'salesPerformance' ? await api('get_performance_context', opts.start || '', opts.end || '', knownPerformanceRevision) :
+        def.id === 'customerOrders' ? await api('get_orders_context', opts.start || '', opts.end || '', knownOrdersRevision) :
         await api('get_stats_context', opts.start || '', opts.end || ''));
-      if (!['annual', 'salesPerformance'].includes(def.id)) putCtx(opts.start || '', opts.end || '', c);
+      if (!['annual', 'salesPerformance', 'customerOrders'].includes(def.id)) putCtx(opts.start || '', opts.end || '', c);
       return c;
     })();
     const pf1 = performance.now();
@@ -1608,6 +1615,11 @@
       spec.dataRevision = revision;
       spec.annualWindow = annualWindow;
       spec.annualAlgorithm = 2;
+    }
+    if (def.id === 'customerOrders') {
+      spec.dataRevision = revision;
+      spec.ordersRange = performanceRange;
+      spec.ordersAlgorithm = 1;
     }
     if (def.id === 'salesPerformance') {
       spec.dataRevision = revision;

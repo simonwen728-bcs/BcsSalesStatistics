@@ -545,7 +545,7 @@ window.STATS = (function () {
       spec.numFmt.push({ range: 'H' + r + ':H' + r, fmt: '#,##0.00' });
       spec.numFmt.push({ range: 'I' + r + ':I' + r, fmt: '0.00%' });
     }
-    spec.widths = [[1, 190], [2, 115], [3, 110], [4, 130], [5, 80], [6, 130], [7, 80], [8, 130], [9, 80]];
+    spec.widths = [150,100,100,180,100,150,100,150,100].map((w,c)=>[c+1,w]);
     spec.freeze = { rows: 1, cols: 0 };
     return spec;
   }
