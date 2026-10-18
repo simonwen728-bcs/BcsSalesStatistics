@@ -520,7 +520,17 @@
   function putCtx(start, end, data) {
     S.ctxCache = { key: (start || '') + '|' + (end || ''), data };
   }
-  function invalidateCtx() { S.ctxCache = null; S.dataToken++; }
+  function invalidateCtx() {
+    S.ctxCache = null; S.dataToken++;
+    Object.values(S.statResults).forEach((r) => { r.stale = true; });
+  }
+  function reportState(spec) {
+    if (!spec) return t('statNotGen');
+    return tf('statStateDone', { t: spec.doneAt || '' }) +
+      (spec.saveFailed ? (LANG === 'zh' ? ' · 保存失败，请重新生成重试' : ' · Save failed; generate again to retry') :
+       spec.stale ? (LANG === 'zh' ? ' · 数据已更新，请重新生成' : ' · Data changed; please regenerate') :
+       (LANG === 'zh' ? ' · 已保存' : ' · Saved'));
+  }
 
   // ================= loading 反馈 =================
   function loadBar(on) {
@@ -1034,20 +1044,7 @@
   // 销售数据变更（导入/删除/清空/还原）后统一调用：已生成报表的结果缓存清掉，
   // 并把对应的报表工作表整张移除（各功能的数据工作表在导航时总会重新渲染，无需处理）
   async function invalidateStatOutputs() {
-    const names = new Set(Object.values(S.statResults).map((s) => String(s.sheet || '')));
-    S.statResults = {};
-    S.dataToken++;
-    if (!S.u) return;
-    const wb = S.u.api.getActiveWorkbook();
-    if (!wb) return;
-    for (const sh of wb.getSheets()) {
-      let nm = '';
-      try { nm = sh.getSheetName(); } catch (e) { continue; }
-      if (!names.has(nm) || wb.getSheets().length <= 1) continue;
-      try {
-        await S.u.api.executeCommand('sheet.command.remove-sheet', { unitId: wb.getId(), subUnitId: sh.getSheetId() });
-      } catch (e) { /* ignore */ }
-    }
+    invalidateCtx();
   }
 
   // 数字格式补隐藏零段（#,##0.00 → #,##0.00;-#,##0.00;），与「零值不显示」口径一致
@@ -1418,6 +1415,8 @@
   async function runStatInner(def, opts, btn) {
     // 计时埋点：取数/计算/渲染 三段耗时写进状态栏（排查“统计要一分钟以上”用）
     const pf0 = performance.now();
+    const revision = await api('get_report_revision');
+    S.ctxCache = null; // 每次重新生成都读取最新数据，避免把旧缓存保存成新报表。
     const ctx = getCtx(opts.start, opts.end) || await (async () => {
       const c = await normalizeCtx(await api('get_stats_context', opts.start || '', opts.end || ''));
       putCtx(opts.start || '', opts.end || '', c);
@@ -1471,13 +1470,22 @@
     try { console.info('[perf]', def.id, 'ctx=' + spec.perf.ctx.toFixed(2) + 's calc=' + spec.perf.calc.toFixed(2) + 's render=' + spec.perf.render.toFixed(2) + 's'); } catch (e) { /* ignore */ }
     spec.doneAt = now2();
     S.yearToggle = spec.yearGroups ? { sheet: spec.sheet, groups: spec.yearGroups } : null;
+    spec.stale = false;
+    try {
+      const saved = await api('save_report', def.id, spec, opts, revision);
+      if (!saved || !saved.ok) throw new Error('Save failed');
+      spec.stale = !!saved.stale;
+    } catch (e) {
+      spec.saveFailed = true;
+      toast(LANG === 'zh' ? '报表已生成，但数据库保存失败，请重新生成重试。' : 'Report generated, but saving failed. Generate again to retry.');
+    }
     S.statResults[def.id] = spec;
     S.statSheetName[def.id] = spec.sheet;
     S.sheetToken[spec.sheet] = 'stat:' + S.dataToken;   // 数据未变时切回该报表=纯激活
     renderStatExtra(def);
     const st = document.getElementById('stat-state');
     if (st) {
-      let txt = tf('statStateDone', { t: spec.doneAt });
+      let txt = reportState(spec);
       if (spec.perf) txt += '（' + tf('statTiming', { a: spec.perf.ctx.toFixed(1), b: spec.perf.calc.toFixed(1), c: spec.perf.render.toFixed(1) }) + '）';
       st.textContent = txt;
     }
@@ -1648,7 +1656,7 @@
       if (hit) hit.classList.add('triggered');
     }
     const cached = S.statResults[def.id];
-    $('#stat-state').textContent = cached ? tf('statStateDone', { t: cached.doneAt || now2() }) : t('statNotGen');
+    $('#stat-state').textContent = reportState(cached);
     renderStatExtra(def);
     // 切换报表必须切到它自己的表格：
     //  - 有最近一次结果 → 重铺（重绘矩阵，不重算）
@@ -3448,6 +3456,18 @@
     if (meta.prefs && meta.prefs.salesPageSize !== undefined) {
       S.pageSize = Number(meta.prefs.salesPageSize);
       if (!(S.pageSize >= 0)) S.pageSize = 200;
+    }
+    try {
+      const saved = await api('load_reports');
+      for (const [id, record] of Object.entries(saved.reports || {})) {
+        if (!S.statResults[id]) {
+          S.statResults[id] = record.spec;
+          S.statOpts[id] = record.options || {};
+          S.statSheetName[id] = record.spec.sheet;
+        }
+      }
+    } catch (e) {
+      toast(LANG === 'zh' ? '已保存报表读取失败，请刷新重试。' : 'Could not load saved reports. Refresh to retry.');
     }
     if (!toolbarsBound) { toolbarsBound = true; bindToolbars(); }
     applyI18n();
