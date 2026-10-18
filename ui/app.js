@@ -1476,14 +1476,14 @@
   async function runStatInner(def, opts, btn) {
     // 计时埋点：取数/计算/渲染 三段耗时写进状态栏（排查“统计要一分钟以上”用）
     const pf0 = performance.now();
-    const revision = await api('get_report_revision');
     S.ctxCache = null; // 每次重新生成都读取最新数据，避免把旧缓存保存成新报表。
     const ctx = getCtx(opts.start, opts.end) || await (async () => {
-      const c = await normalizeCtx(await api('get_stats_context', opts.start || '', opts.end || ''));
-      putCtx(opts.start || '', opts.end || '', c);
+      const c = await normalizeCtx(def.id === 'annual' ? await api('get_annual_context') : await api('get_stats_context', opts.start || '', opts.end || ''));
+      if (def.id !== 'annual') putCtx(opts.start || '', opts.end || '', c);
       return c;
     })();
     const pf1 = performance.now();
+    const revision = ctx && ctx.revision;
     if (!ctx || !ctx.sales || !ctx.sales.length) {
       // 区分「库里完全没有销售」和「所选时间段内没有销售」
       if (opts.start || opts.end) {
@@ -1532,6 +1532,7 @@
     spec.doneAt = now2();
     S.yearToggle = spec.yearGroups ? { sheet: spec.sheet, groups: spec.yearGroups } : null;
     spec.stale = false;
+    const saveStarted = performance.now();
     try {
       const saved = await api('save_report', def.id, spec, opts, revision);
       if (!saved || !saved.ok) throw new Error('Save failed');
@@ -1540,6 +1541,8 @@
       spec.saveFailed = true;
       toast(LANG === 'zh' ? '报表已生成，但数据库保存失败，请重新生成重试。' : 'Report generated, but saving failed. Generate again to retry.');
     }
+    spec.perf.save = (performance.now() - saveStarted) / 1000;
+    spec.perf.total = (performance.now() - pf0) / 1000;
     S.statResults[def.id] = spec;
     S.statSheetName[def.id] = spec.sheet;
     S.sheetToken[spec.sheet] = 'stat:' + S.dataToken;   // 数据未变时切回该报表=纯激活
@@ -1548,6 +1551,7 @@
     if (st) {
       let txt = reportState(spec);
       if (spec.perf) txt += '（' + tf('statTiming', { a: spec.perf.ctx.toFixed(1), b: spec.perf.calc.toFixed(1), c: spec.perf.render.toFixed(1) }) + '）';
+      txt += LANG === 'zh' ? ' · 保存 ' + spec.perf.save.toFixed(1) + 's · 总计 ' + spec.perf.total.toFixed(1) + 's' : ' · Save ' + spec.perf.save.toFixed(1) + 's · Total ' + spec.perf.total.toFixed(1) + 's';
       st.textContent = txt;
     }
     if (btn) {
@@ -1622,6 +1626,22 @@
   async function renderStatCardInner(def, tk) {
     const def2 = def;
     if (!def2) return;
+    S.reportsLoaded = S.reportsLoaded || {};
+    if (!S.reportsLoaded[def.id] && !S.statResults[def.id]) {
+      try {
+        const result = await api('load_report', def.id);
+        const record = result.report;
+        if (record && !S.statResults[def.id]) {
+          S.statResults[def.id] = record.spec;
+          S.statOpts[def.id] = record.options || {};
+          S.statSheetName[def.id] = record.spec.sheet;
+        }
+        S.reportsLoaded[def.id] = true;
+      } catch (e) {
+        toast(LANG === 'zh' ? '已保存报表读取失败，请重新打开重试。' : 'Could not load saved report. Reopen to retry.');
+      }
+    }
+    if (tk !== undefined && tk !== statCardToken) return;
     $('#stat-cond-title').textContent = '▶ ' + t(def.labelKey);
     const box = $('#stat-cond-fields');
     box.innerHTML = '';
@@ -3582,18 +3602,6 @@
     if (meta.prefs && meta.prefs.salesPageSize !== undefined) {
       S.pageSize = Number(meta.prefs.salesPageSize);
       if (!(S.pageSize >= 0)) S.pageSize = 200;
-    }
-    try {
-      const saved = await api('load_reports');
-      for (const [id, record] of Object.entries(saved.reports || {})) {
-        if (!S.statResults[id]) {
-          S.statResults[id] = record.spec;
-          S.statOpts[id] = record.options || {};
-          S.statSheetName[id] = record.spec.sheet;
-        }
-      }
-    } catch (e) {
-      toast(LANG === 'zh' ? '已保存报表读取失败，请刷新重试。' : 'Could not load saved reports. Refresh to retry.');
     }
     if (!toolbarsBound) { toolbarsBound = true; bindToolbars(); }
     applyI18n();
