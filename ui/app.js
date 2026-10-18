@@ -845,6 +845,7 @@
     // 兜底行选中：body 捕获阶段监听 mouseup（画布会吞掉冒泡），从选区读取行号
     try {
       const onMountMouseup = (e) => {
+        if (e.target && e.target.closest && e.target.closest('#annualGroupGutter')) return;
         if (!e.target || !e.target.closest || !e.target.closest('#univerMount')) return;
         setTimeout(() => {
           try {
@@ -1080,6 +1081,48 @@
     }
   }
 
+  // 年度固定模板：样式随数据一次写入，避免逐格百分比修复和格式命令。
+  function renderAnnualTemplate(spec, sh) {
+    const started = performance.now();
+    const nr = spec.values.length;
+    const nc = spec.values[0].length;
+    const key = String(spec.sheet);
+    const summaryRows = new Set([nr - 2, nr - 1, ...spec.yearGroups.map((g) => g.row - 1)]);
+    const user = S.userStyles[key] || {};
+    const baseline = {};
+    const matrix = spec.values.map((row, ri) => Array.from({ length: nc }, (_, ci) => {
+      const percent = ri > 0 && ci >= 5 && ci % 2 === 1;
+      const style = Object.assign({ bl: ri === 0 || summaryRows.has(ri) ? 1 : 0,
+        ht: ci === 0 ? 1 : 3 }, ri === 0 ? { bg: { rgb: '#1f4e78' }, cl: { rgb: '#ffffff' } } : {}, user[ri + ':' + ci] || {});
+      style.ht = ri === 0 ? 2 : ci === 0 ? (summaryRows.has(ri) ? 2 : 1) : percent ? 2 : 3; // 表头/比例居中，A列左，金额右
+      if (ri > 0 && ci > 0) style.n = { pattern: percent ? '0.00%;-0.00%;' : '#,##0.00;-#,##0.00;' };
+      baseline[ri + ':' + ci] = style;
+      const v = row[ci] === undefined || row[ci] === 0 ? '' : row[ci];
+      return { v, s: style };
+    }));
+    sh.getRange(0, 0, nr, nc).setValues(matrix);
+    const raw = S.sheetLayouts[key];
+    const saved = Array.isArray(raw) ? { w: raw, h: {} } : (raw || {});
+    // 年度报表固定尺寸，覆盖旧的列宽/行高记忆。
+    const widths = Array.from({length: nc}, (_, ci) =>
+      ci === 0 ? 120 : ci >= 5 && ci % 2 === 1 ? 100 : 150);
+    widths.forEach((w, ci) => sh.setColumnWidth(ci, w));
+    sh.setRowHeights(0, nr, 30);
+    const heights = {};
+    const fz = saved.fz || { y: 1, x: 0 };
+    sh.setFrozenRows(fz.y || 0); sh.setFrozenColumns(fz.x || 0);
+    applyAnnualGroups(spec, sh);
+    S.appliedLayouts[key] = { w: widths, h: heights, fz };
+    S.appliedStyles[key] = baseline;
+    S.sheetExtent = S.sheetExtent || {};
+    S.sheetExtent[key] = { rows: nr, cols: nc };
+    S.lastRenderedSheet = key;
+    sh.activate();
+    try { window.dispatchEvent(new Event('resize')); } catch (e) { /* ignore */ }
+    window.__annualTemplateProfile = { rows: nr, columns: nc,
+      milliseconds: Math.round(performance.now() - started), bulkWrites: 1 };
+  }
+
   async function renderSpecInnerBody(spec) {
     placeMount();
     // 每个功能拥有自己的工作表：按 spec.sheet 找表（无则新建），原地清空重写，不影响其他功能的表
@@ -1171,6 +1214,10 @@
     try {
       if (sh.getMaxRows() < need) sh.insertRows(sh.getMaxRows(), need - sh.getMaxRows());
     } catch (e) { /* ignore */ }
+    if (spec.yearGroups && !off) {
+      renderAnnualTemplate(spec, sh);
+      return;
+    }
     // 数字格式随值一次写入（{v, s:{n:{pattern}}}）：绕开 numfmt 命令、万行级 250ms 内完成；
     // 同时 0 值渲染为空单元格（客户口径）。zhFmt 已补隐藏零段。
     const colIdxOf = (letters) => letters.split('').reduce((a, ch) => a * 26 + ch.charCodeAt(0) - 64, 0) - 1;
@@ -2314,10 +2361,72 @@
       if (g.collapsed) sh.hideRows(first, g.months.length);
       else sh.showRows(first, g.months.length);
       g.label = String(spec.values[g.row - 1][0]);
-      sh.getRange(g.row - 1, 0, 1, 1).setValues([[(g.collapsed ? '+ ' : '− ') + g.label]]);
+      sh.getRange(g.row - 1, 0, 1, 1).setValues([[g.label]]);
     });
     spec.yearGroups.forEach((g) => sh.showRows(g.row - 1, 1));
     S.yearToggle = { sheet: spec.sheet, groups: spec.yearGroups };
+    ensureAnnualGutter();
+  }
+
+  let annualGutter = null;
+  let annualGutterTimer = null;
+  function ensureAnnualGutter() {
+    if (annualGutterTimer) return;
+    const mount = document.getElementById('univerMount');
+    if (!mount) return;
+    annualGutter = document.createElement('div');
+    annualGutter.id = 'annualGroupGutter';
+    annualGutter.setAttribute('aria-label', 'Annual month groups');
+    annualGutter.style.cssText = 'position:absolute;inset:0;pointer-events:none;z-index:20;overflow:hidden;';
+    mount.appendChild(annualGutter);
+    const update = () => {
+      const state = S.yearToggle;
+      if (S.nav !== 'r:annual' || !state || !S.u || S.isRendering) {
+        annualGutter.style.display = 'none'; return;
+      }
+      try {
+        const wb = S.u.api.getActiveWorkbook();
+        const sh = wb.getSheets().find((x) => x.getSheetName() === state.sheet);
+        const canvases = [...mount.querySelectorAll('canvas')];
+        const canvas = canvases.sort((a,b) => b.clientHeight - a.clientHeight)[0];
+        if (!sh || !canvas) { annualGutter.style.display = 'none'; return; }
+        const mr = mount.getBoundingClientRect(), cr = canvas.getBoundingClientRect();
+        const zoom = sh.getSheet().getZoomRatio();
+        const scroll = wb.getScrollStateBySheetId(sh.getSheetId()) || {};
+        const sy = Number(scroll.viewportScrollY) || 0;
+        const header = sh.getRange(0,0,1,1).getCellRect();
+        const freeze = sh.getFreeze();
+        const frozenRows = freeze && freeze.ySplit || 0;
+        const boundary = frozenRows ? sh.getRange(frozenRows-1,0,1,1).getCellRect().bottom : header.top;
+        const clipTop = cr.top - mr.top + boundary * zoom;
+        const bottom = Math.min(mr.height, cr.bottom - mr.top) - 18;
+        annualGutter.style.display = '';
+        const ids = new Set();
+        for (const g of state.groups || []) {
+          const id = String(g.row); ids.add(id);
+          let btn = annualGutter.querySelector('[data-year-row="' + id + '"]');
+          if (!btn) {
+            btn = document.createElement('button'); btn.type = 'button'; btn.dataset.yearRow = id;
+            btn.style.cssText = 'position:absolute;width:18px;height:20px;padding:0;border:1px solid #9aa8b6;border-radius:3px;background:#fff;color:#254b70;font:bold 15px Arial;pointer-events:auto;cursor:pointer;';
+            btn.addEventListener('mousedown', (e) => e.stopPropagation());
+            btn.addEventListener('mouseup', (e) => e.stopPropagation());
+            btn.addEventListener('click', (e) => { e.stopPropagation(); onSheetCell(Number(btn.dataset.yearRow)-1); update(); });
+            annualGutter.appendChild(btn);
+          }
+          const rect = sh.getRange(g.row-1,0,1,1).getCellRect();
+          const y = cr.top - mr.top + (rect.top - (g.row-1 >= frozenRows ? sy : 0)) * zoom + rect.height * zoom / 2 - 10;
+          btn.style.left = Math.max(0, cr.left-mr.left+2) + 'px';
+          btn.style.top = y + 'px';
+          btn.style.display = y < clipTop || y+20 > bottom ? 'none' : '';
+          btn.textContent = g.collapsed ? '+' : '−';
+          btn.setAttribute('aria-expanded', String(!g.collapsed));
+          btn.title = (g.collapsed ? 'Expand ' : 'Collapse ') + (g.label || '');
+        }
+        for (const btn of [...annualGutter.children]) if (!ids.has(btn.dataset.yearRow)) btn.remove();
+      } catch (e) { annualGutter.style.display = 'none'; }
+    };
+    annualGutterTimer = setInterval(update, 100);
+    update();
   }
 
   let lastAnnualClick = { sheet: '', row: -1, at: -Infinity };
@@ -2337,7 +2446,7 @@
           const ok = collapsed ? sh.hideRows(g.months[0] - 1, g.months.length) : sh.showRows(g.months[0] - 1, g.months.length);
           if (ok === false) throw new Error('Unable to change month visibility');
           g.collapsed = collapsed;
-          if (g.label != null) sh.getRange(g.row - 1, 0, 1, 1).setValues([[(collapsed ? '+ ' : '− ') + g.label]]);
+          if (g.label != null) sh.getRange(g.row - 1, 0, 1, 1).setValues([[g.label]]);
         } catch (e) {
           toast(LANG === 'zh' ? '月份折叠失败，请重新生成报表。' : 'Could not toggle months. Please regenerate the report.');
         }
