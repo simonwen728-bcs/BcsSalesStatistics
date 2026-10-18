@@ -68,6 +68,8 @@ def init_db():
         con = connect()
         try:
             con.executescript(SCHEMA)
+            con.execute("CREATE INDEX IF NOT EXISTS idx_sales_date_invoice_id ON sales(sold_date DESC,invoice,id)")
+            con.execute("CREATE INDEX IF NOT EXISTS idx_sales_type_date_invoice_id ON sales(type,sold_date DESC,invoice,id)")
             con.execute("INSERT INTO bcs_prefs(key,value) VALUES (?,?) ON CONFLICT(key) DO NOTHING",
                         ("dataRevision", json.dumps(uuid.uuid4().hex)))
             con.commit()
@@ -229,17 +231,44 @@ class Api:
         if f.get("rep1"):
             where.append("rep1 LIKE ?"); params.append("%" + f["rep1"] + "%")
         w = ("WHERE " + " AND ".join(where)) if where else ""
+        offset = max(0, int(offset))
+        limit = max(1, min(60000, int(limit)))
         with DB_LOCK:
             con = connect()
             try:
-                total = con.execute("SELECT COUNT(*) FROM sales " + w, params).fetchone()[0]
+                revision = read_data_revision(con)
+                cache = getattr(self, "_sales_query_cache", None)
+                if not cache or cache["revision"] != revision:
+                    cache = {"revision": revision, "pages": {}, "counts": {}, "groups": None}
+                    self._sales_query_cache = cache
+                filter_key = (w, tuple(params))
+                page_key = (filter_key, offset, limit)
+                if page_key in cache["pages"]:
+                    return cache["pages"][page_key]
                 rows = con.execute(
                     "SELECT * FROM sales " + w + " ORDER BY sold_date DESC, invoice, id LIMIT ? OFFSET ?",
                     params + [limit, offset]).fetchall()
-                gm = get_reps_group_map(con)
+                # A short first page already gives the exact total; avoid another table scan.
+                if offset == 0 and len(rows) < limit:
+                    total = len(rows)
+                elif filter_key in cache["counts"]:
+                    total = cache["counts"][filter_key]
+                else:
+                    total = con.execute("SELECT COUNT(*) FROM sales " + w, params).fetchone()[0]
+                if len(cache["counts"]) >= 128:
+                    cache["counts"].clear()
+                cache["counts"][filter_key] = total
+                if cache["groups"] is None:
+                    cache["groups"] = get_reps_group_map(con)
+                result = {"total": total, "rows": [enrich_sale(row_to_sale(r), cache["groups"]) for r in rows]}
+                # Bound page-cache memory; full-history queries are deliberately not retained.
+                if limit <= 1000:
+                    if len(cache["pages"]) >= 32:
+                        cache["pages"].pop(next(iter(cache["pages"])))
+                    cache["pages"][page_key] = result
+                return result
             finally:
                 con.close()
-        return {"total": total, "rows": [enrich_sale(row_to_sale(r), gm) for r in rows]}
 
     def update_sale(self, sale_id, values_json):
         try:
@@ -568,6 +597,37 @@ class Api:
             result = {"cols": fields, "rows": [[r[i] or (0 if i>=7 else "") for i in range(9)]
                                                  for r in rows], "reps": reps, "revision": revision}
             self._customer_stats_cache = (key, result)
+            return result
+
+    def get_customer_reports_context(self, start="", end="", known_revision=""):
+        """Shared compact source for customer reports; preserve every original sales row."""
+        where, params = [], []
+        if start:
+            where.append("sold_date >= ?"); params.append(start)
+        if end:
+            where.append("sold_date <= ?"); params.append(end)
+        condition = " WHERE " + " AND ".join(where) if where else ""
+        with DB_LOCK:
+            con = connect()
+            try:
+                revision = read_data_revision(con)
+                if known_revision and known_revision == revision:
+                    return {"unchanged": True, "revision": revision}
+                key = (revision, start, end)
+                cached = getattr(self, "_customer_reports_cache", None)
+                if cached and cached[0] == key:
+                    return cached[1]
+                rows = con.execute("SELECT sold_date,invoice,cust_no,cust_name,rep1,rep2,amount "
+                                   "FROM sales" + condition + " ORDER BY sold_date,invoice,id", params).fetchall()
+                reps = {"s1": [row_to_rep(r) for r in con.execute(
+                    "SELECT * FROM reps WHERE kind='s1' AND (deleted IS NULL OR deleted=0) ORDER BY code")], "s2": []}
+                customers = [row_to_customer(r) for r in con.execute("SELECT * FROM customers ORDER BY no")]
+            finally:
+                con.close()
+            result = {"cols": ["soldDate","invoice","custNo","custName","rep1","rep2","amount"],
+                      "rows": [[r[i] or (0 if i==6 else "") for i in range(7)] for r in rows],
+                      "reps": reps, "customers": customers, "revision": revision}
+            self._customer_reports_cache = (key, result)
             return result
 
     def get_history_context(self, start="", end="", filters=None, known_revision=""):
