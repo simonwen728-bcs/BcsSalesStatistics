@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BCS 销售统计 - 单机本地版后端
-Python 标准库 only (http.server + sqlite3 + json)，无需 pip 安装任何依赖。
+BCS 销售统计 - 外部 PostgreSQL / 本地 SQLite 双模式后端
+Render 必须设置 DATABASE_URL；依赖见 requirements.txt。
 
 运行:  python server.py            (默认端口 18789)
        python server.py --port 8080
 数据:  ./data/bcs_data.db          (SQLite，程序文件夹内)
-设置:  ./data/prefs.json           (行高列宽等界面设置，自动保存)
+设置:  数据库 bcs_prefs 表（旧 prefs.json 自动迁移缺失键）
 """
 import argparse
 import gzip
@@ -18,6 +18,8 @@ import re
 import shutil
 import sqlite3
 import sys
+import tempfile
+from storage import PostgresConnection, DATABASE_URL
 import threading
 import time
 import urllib.parse
@@ -27,7 +29,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "data")
+DATA_DIR = os.environ.get("BCS_DATA_DIR", os.path.join(BASE_DIR, "data"))
 DB_PATH = os.path.join(DATA_DIR, "bcs_data.db")
 PREFS_PATH = os.path.join(DATA_DIR, "prefs.json")
 SHEETS_API_URL = os.environ.get(
@@ -51,7 +53,14 @@ PREFS_LOCK = threading.RLock()
 
 # ================= 数据库 =================
 
+SCHEMA = "\n            CREATE TABLE IF NOT EXISTS sales (\n              id TEXT PRIMARY KEY, batch_id TEXT NOT NULL, month TEXT NOT NULL,\n              item_no TEXT DEFAULT '', description TEXT DEFAULT '', color TEXT DEFAULT '',\n              name TEXT DEFAULT '', type TEXT DEFAULT '', category TEXT DEFAULT '',\n              product_type TEXT DEFAULT '', sold_date TEXT DEFAULT '', invoice TEXT DEFAULT '',\n              ledger TEXT DEFAULT '', cust_no TEXT DEFAULT '', cust_name TEXT DEFAULT '',\n              rep1 TEXT DEFAULT '', rep1_name TEXT DEFAULT '', rep2 TEXT DEFAULT '',\n              rep2_name TEXT DEFAULT '', qty REAL DEFAULT 0, amount REAL DEFAULT 0, cost REAL DEFAULT 0\n            );\n            CREATE TABLE IF NOT EXISTS customers (\n              no TEXT PRIMARY KEY, name TEXT DEFAULT '', city TEXT DEFAULT '',\n              state TEXT DEFAULT '', phone TEXT DEFAULT '', contact TEXT DEFAULT '',\n              type TEXT DEFAULT '', email TEXT DEFAULT '', sales1 TEXT DEFAULT '',\n              created_at TEXT DEFAULT ''\n            );\n            CREATE TABLE IF NOT EXISTS stock (\n              item_no TEXT PRIMARY KEY, description TEXT DEFAULT '',\n              available REAL DEFAULT 0, in_transit REAL DEFAULT 0\n            );\n            CREATE TABLE IF NOT EXISTS reps (\n              kind TEXT NOT NULL, code TEXT NOT NULL, name TEXT DEFAULT '',\n              group_ TEXT DEFAULT '', locked INTEGER DEFAULT 0, deleted INTEGER DEFAULT 0,\n              PRIMARY KEY (kind, code)\n            );\n            CREATE TABLE IF NOT EXISTS batches (\n              id TEXT PRIMARY KEY, month TEXT NOT NULL, file TEXT DEFAULT '',\n              rows INTEGER DEFAULT 0, imported_at TEXT DEFAULT ''\n            );\n            CREATE TABLE IF NOT EXISTS meta (\n              key TEXT PRIMARY KEY, value TEXT DEFAULT ''\n            );\n            CREATE INDEX IF NOT EXISTS idx_sales_month ON sales(month);\n            CREATE INDEX IF NOT EXISTS idx_sales_date ON sales(sold_date);\n            CREATE INDEX IF NOT EXISTS idx_sales_item ON sales(item_no);\n            CREATE INDEX IF NOT EXISTS idx_sales_cust ON sales(cust_no);\n            CREATE INDEX IF NOT EXISTS idx_sales_batch ON sales(batch_id);\n            \nCREATE TABLE IF NOT EXISTS bcs_prefs (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
+
+
 def connect():
+    if DATABASE_URL:
+        return PostgresConnection()
+    if os.environ.get("RENDER") == "true":
+        raise RuntimeError("请先设置 DATABASE_URL；Render 上禁止使用临时本地数据库。")
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
     return con
@@ -61,44 +70,7 @@ def init_db():
     with DB_LOCK:
         con = connect()
         try:
-            con.executescript("""
-            CREATE TABLE IF NOT EXISTS sales (
-              id TEXT PRIMARY KEY, batch_id TEXT NOT NULL, month TEXT NOT NULL,
-              item_no TEXT DEFAULT '', description TEXT DEFAULT '', color TEXT DEFAULT '',
-              name TEXT DEFAULT '', type TEXT DEFAULT '', category TEXT DEFAULT '',
-              product_type TEXT DEFAULT '', sold_date TEXT DEFAULT '', invoice TEXT DEFAULT '',
-              ledger TEXT DEFAULT '', cust_no TEXT DEFAULT '', cust_name TEXT DEFAULT '',
-              rep1 TEXT DEFAULT '', rep1_name TEXT DEFAULT '', rep2 TEXT DEFAULT '',
-              rep2_name TEXT DEFAULT '', qty REAL DEFAULT 0, amount REAL DEFAULT 0, cost REAL DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS customers (
-              no TEXT PRIMARY KEY, name TEXT DEFAULT '', city TEXT DEFAULT '',
-              state TEXT DEFAULT '', phone TEXT DEFAULT '', contact TEXT DEFAULT '',
-              type TEXT DEFAULT '', email TEXT DEFAULT '', sales1 TEXT DEFAULT '',
-              created_at TEXT DEFAULT ''
-            );
-            CREATE TABLE IF NOT EXISTS stock (
-              item_no TEXT PRIMARY KEY, description TEXT DEFAULT '',
-              available REAL DEFAULT 0, in_transit REAL DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS reps (
-              kind TEXT NOT NULL, code TEXT NOT NULL, name TEXT DEFAULT '',
-              group_ TEXT DEFAULT '', locked INTEGER DEFAULT 0, deleted INTEGER DEFAULT 0,
-              PRIMARY KEY (kind, code)
-            );
-            CREATE TABLE IF NOT EXISTS batches (
-              id TEXT PRIMARY KEY, month TEXT NOT NULL, file TEXT DEFAULT '',
-              rows INTEGER DEFAULT 0, imported_at TEXT DEFAULT ''
-            );
-            CREATE TABLE IF NOT EXISTS meta (
-              key TEXT PRIMARY KEY, value TEXT DEFAULT ''
-            );
-            CREATE INDEX IF NOT EXISTS idx_sales_month ON sales(month);
-            CREATE INDEX IF NOT EXISTS idx_sales_date ON sales(sold_date);
-            CREATE INDEX IF NOT EXISTS idx_sales_item ON sales(item_no);
-            CREATE INDEX IF NOT EXISTS idx_sales_cust ON sales(cust_no);
-            CREATE INDEX IF NOT EXISTS idx_sales_batch ON sales(batch_id);
-            """)
+            con.executescript(SCHEMA)
             con.commit()
         finally:
             con.close()
@@ -168,20 +140,41 @@ def now_str():
 # ================= prefs (界面设置:行高列宽等) =================
 
 def prefs_load():
-    with PREFS_LOCK:
+    with DB_LOCK:
+        con = connect()
         try:
-            with open(PREFS_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
+            return {r[0]: json.loads(r[1]) for r in con.execute("SELECT key,value FROM bcs_prefs")}
+        finally:
+            con.close()
 
 
-def prefs_save(d):
-    with PREFS_LOCK:
-        tmp = PREFS_PATH + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(d, f, ensure_ascii=False)
-        os.replace(tmp, PREFS_PATH)
+def pref_set(key, value):
+    with DB_LOCK:
+        con = connect()
+        try:
+            con.execute("INSERT INTO bcs_prefs (key,value) VALUES (?,?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        (str(key), json.dumps(value, ensure_ascii=False)))
+            con.commit()
+        finally:
+            con.close()
+
+
+def migrate_local_prefs():
+    # Only fills missing keys; never replaces settings already in the database.
+    if not os.path.exists(PREFS_PATH):
+        return
+    with open(PREFS_PATH, encoding="utf-8") as f:
+        old = json.load(f)
+    with DB_LOCK:
+        con = connect()
+        try:
+            for key, value in old.items():
+                con.execute("INSERT INTO bcs_prefs (key,value) VALUES (?,?) ON CONFLICT(key) DO NOTHING",
+                            (key, json.dumps(value, ensure_ascii=False)))
+            con.commit()
+        finally:
+            con.close()
 
 
 # ================= API 实现 =================
@@ -279,17 +272,17 @@ class Api:
             try:
                 con.execute("DELETE FROM sales WHERE batch_id=?", (batch_id,))
                 n = 0
+                pending_rows = []
                 for i, r in enumerate(records):
                     rid = "%s_%d" % (batch_id, i)
                     m = (r.get("soldDate") or "")[:7]
                     if not re.match(r"^\d{4}-\d{2}$", m):
                         m = month
-                    con.execute(
-                        """INSERT OR REPLACE INTO sales
+                    insert_sql = """INSERT OR REPLACE INTO sales
                         (id,batch_id,month,item_no,description,color,name,type,category,product_type,
                          sold_date,invoice,ledger,cust_no,cust_name,rep1,rep1_name,rep2,rep2_name,qty,amount,cost)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                        (rid, batch_id, m, r.get("itemNo") or "", r.get("description") or "",
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"""
+                    pending_rows.append((rid, batch_id, m, r.get("itemNo") or "", r.get("description") or "",
                          r.get("color") or "", r.get("name") or "", r.get("type") or "",
                          r.get("category") or "", r.get("productType") or "",
                          r.get("soldDate") or "", r.get("invoice") or "", r.get("ledger") or "",
@@ -298,6 +291,8 @@ class Api:
                          r.get("rep2") or "", r.get("rep2Name") or "",
                          _num(r.get("qty")), _num(r.get("amount")), _num(r.get("cost"))))
                     n += 1
+                if pending_rows:
+                    con.executemany(insert_sql, pending_rows)
                 con.execute(
                     "INSERT OR REPLACE INTO batches (id,month,file,rows,imported_at) VALUES (?,?,?,?,?)",
                     (batch_id, month, file, n, now_str()))
@@ -710,15 +705,11 @@ class Api:
         return meta
 
     def set_pref(self, key, value):
-        prefs = prefs_load()
-        prefs[key] = value
-        prefs_save(prefs)
+        pref_set(key, value)
         return {"ok": True}
 
     def set_lang(self, lang):
-        prefs = prefs_load()
-        prefs["lang"] = lang
-        prefs_save(prefs)
+        pref_set("lang", lang)
         return {"ok": True}
 
     def close_app(self):
@@ -734,6 +725,8 @@ class Api:
                           for t in ("sales", "customers", "stock", "reps", "batches")}
             finally:
                 con.close()
+        if DATABASE_URL:
+            return {"ok": True, "counts": counts, "size": 0, "mtime": "", "storage": "PostgreSQL"}
         size = os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else 0
         return {"ok": True, "counts": counts, "size": size,
                 "mtime": time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(DB_PATH)))
@@ -1027,20 +1020,11 @@ class Handler(BaseHTTPRequestHandler):
         self._send(body, ctype)
 
     def _backup_download(self):
-        if not os.path.exists(DB_PATH):
-            self._json({"ok": False, "error": "no db"}, 404)
-            return
-        with DB_LOCK:
-            tmp = DB_PATH + ".dl"
-            shutil.copy2(DB_PATH, tmp)
         try:
-            with open(tmp, "rb") as f:
-                body = f.read()
-        finally:
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+            body = export_backup_bytes()
+        except Exception:
+            self._json({"ok": False, "error": "备份导出失败，请检查数据库连接。"}, 500)
+            return
         fname = "bcs_backup_%s.db" % time.strftime("%Y%m%d_%H%M%S")
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
@@ -1088,23 +1072,86 @@ class Handler(BaseHTTPRequestHandler):
         if len(raw) < 100 or not raw.startswith(b"SQLite format 3\x00"):
             self._json({"ok": False, "error": "不是有效的 SQLite 数据库文件"})
             return
-        with DB_LOCK:
-            bak = DB_PATH + ".bak"
-            if os.path.exists(DB_PATH):
-                shutil.copy2(DB_PATH, bak)
-            with open(DB_PATH, "wb") as f:
-                f.write(raw)
-            # 简单校验
-            try:
-                con = sqlite3.connect(DB_PATH)
-                con.execute("SELECT count(*) FROM sqlite_master").fetchone()
-                con.close()
-            except Exception as e:
-                if os.path.exists(bak):
-                    shutil.copy2(bak, DB_PATH)
-                self._json({"ok": False, "error": "数据库校验失败: %s" % e})
-                return
+        try:
+            restore_backup_bytes(raw)
+        except Exception as e:
+            self._json({"ok": False, "error": "备份恢复失败，原数据未改动: " + str(e)}, 400)
+            return
         self._json({"ok": True})
+
+
+BACKUP_TABLES = ("sales", "customers", "stock", "reps", "batches", "meta", "bcs_prefs")
+
+
+def export_backup_bytes():
+    with tempfile.TemporaryDirectory() as td, DB_LOCK:
+        path = os.path.join(td, "backup.db")
+        out = sqlite3.connect(path)
+        src = connect()
+        try:
+            out.executescript(SCHEMA)
+            if DATABASE_URL:
+                src.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            for table in BACKUP_TABLES:
+                cursor = src.execute("SELECT * FROM " + table)
+                cols = [d[0] for d in cursor.description]
+                sql = 'INSERT INTO ' + table + ' (' + ','.join('"'+c+'"' for c in cols) + ') VALUES (' + ','.join('?' for c in cols) + ')'
+                while True:
+                    rows = cursor.fetchmany(1000)
+                    if not rows:
+                        break
+                    out.executemany(sql, [tuple(r) for r in rows])
+            out.commit()
+        finally:
+            src.close()
+            out.close()
+        with open(path, "rb") as f:
+            return f.read()
+
+
+def restore_backup_bytes(raw):
+    # Validate a separate file completely before touching live data. Restores are atomic.
+    with tempfile.TemporaryDirectory() as td, DB_LOCK:
+        path = os.path.join(td, "incoming.db")
+        with open(path, "wb") as f:
+            f.write(raw)
+        source = sqlite3.connect(path)
+        expected = sqlite3.connect(":memory:")
+        dest = None
+        try:
+            source.execute("PRAGMA trusted_schema=OFF")
+            if source.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise ValueError("数据库完整性检查未通过")
+            expected.executescript(SCHEMA)
+            tables = {r[0] for r in source.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            columns = {}
+            for table in BACKUP_TABLES:
+                if table == "bcs_prefs" and table not in tables:
+                    continue  # old backups did not contain UI preferences
+                if table not in tables:
+                    raise ValueError("缺少数据表: " + table)
+                cols = [r[1] for r in expected.execute("PRAGMA table_info(" + table + ")")]
+                actual = [r[1] for r in source.execute("PRAGMA table_info(" + table + ")")]
+                if not set(cols).issubset(actual):
+                    raise ValueError("数据表结构不兼容: " + table)
+                columns[table] = cols
+            dest = connect()
+            for table, cols in columns.items():
+                dest.execute("DELETE FROM " + table)
+                names = ','.join('"'+c+'"' for c in cols)
+                insert = 'INSERT INTO ' + table + ' (' + names + ') VALUES (' + ','.join('?' for c in cols) + ')'
+                cursor = source.execute('SELECT ' + names + ' FROM ' + table)
+                while True:
+                    rows = cursor.fetchmany(1000)
+                    if not rows:
+                        break
+                    dest.executemany(insert, rows)
+            dest.commit()
+        finally:
+            if dest is not None:
+                dest.close()  # rollback if any error occurred before commit
+            source.close()
+            expected.close()
 
 
 def main():
@@ -1114,6 +1161,7 @@ def main():
     args = ap.parse_args()
 
     init_db()
+    migrate_local_prefs()
     if os.environ.get("AUTO_SYNC") == "1":
         print("AUTO_SYNC=1,正在从 Google Sheets 同步数据...")
         # 销售从 V66 读（V66 数据是最新的，服务重启后自动恢复销售）
@@ -1133,7 +1181,7 @@ def main():
     print("=" * 60)
     print("BCS 销售统计单机版已启动")
     print("访问地址: %s" % url)
-    print("数据库:   %s" % DB_PATH)
+    print("数据库:   %s" % ("PostgreSQL（外部持久存储）" if DATABASE_URL else DB_PATH))
     print("=" * 60)
     if not args.no_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
