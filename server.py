@@ -32,10 +32,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("BCS_DATA_DIR", os.path.join(BASE_DIR, "data"))
 DB_PATH = os.path.join(DATA_DIR, "bcs_data.db")
 PREFS_PATH = os.path.join(DATA_DIR, "prefs.json")
-SHEETS_API_URL = os.environ.get(
-    "SHEETS_API_URL",
-    "https://script.google.com/macros/s/AKfycbwmHqWobogKZ6CEAoyUPzn6sMorU_ZfigS-wRKt-goWuirAggXQb_BUiHB4FjTbknPR/exec?sheet=Pull",
-)
 # 报价工具共享文档的 Pull 接口（合并接口）：石材库存直接读这里的 Pull，不再用销售统计表里的 StoneStock 页签。
 # Pull 11 列：No.=0, Description=1, Item Type=2, Qty.(On Hand)=3, Available for Sales Qty.=4,
 # Qty.(Transit)=5, Unit Price=6, Blocked=7, Only PO=8, Color=9, Category=10
@@ -736,77 +732,6 @@ class Api:
         # 网页版走 /api/backup_upload 直接传文件;此接口保留兼容
         return {"ok": False, "error": "请使用备份上传功能"}
 
-    def sync_from_sheets(self):
-        """从 Google Sheets JSON 接口同步销售数据,按 soldDate 月份分组导入。
-        数据源: SHEETS_API_URL 环境变量,默认为 V66 销售统计表的 Pull 工作表。"""
-        url = SHEETS_API_URL
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "BCS-Sync/1.0"})
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                raw = resp.read()
-        except Exception as e:
-            return {"ok": False, "error": "拉取失败: %s: %s" % (type(e).__name__, e)}
-        try:
-            data = json.loads(raw.decode("utf-8"))
-        except Exception as e:
-            return {"ok": False, "error": "JSON 解析失败: %s" % e}
-        if not data.get("ok"):
-            return {"ok": False, "error": data.get("error") or "接口返回失败"}
-        rows = data.get("rows") or []
-        # 按 soldDate 月份 (YYYY-MM) 分组
-        months = {}
-        skipped = 0
-        for r in rows:
-            try:
-                sold = str(r[7] or "").strip()[:10]
-            except Exception:
-                sold = ""
-            m = sold[:7] if re.match(r"^\d{4}-\d{2}$", sold[:7]) else ""
-            if not m:
-                skipped += 1
-                continue
-            rec = {
-                "itemNo": str(r[0] or ""), "description": str(r[1] or ""),
-                "color": str(r[2] or ""), "name": str(r[3] or ""),
-                "type": str(r[4] or ""), "category": str(r[5] or ""),
-                "productType": str(r[6] or ""), "soldDate": sold,
-                "invoice": str(r[8] or ""), "ledger": str(r[9] or ""),
-                "custNo": str(r[10] or ""), "custName": str(r[11] or ""),
-                "rep1": str(r[12] or ""), "rep1Name": str(r[13] or ""),
-                "rep2": str(r[14] or ""), "rep2Name": str(r[15] or ""),
-                "qty": _num(r[16]), "amount": _num(r[17]), "cost": _num(r[18]),
-            }
-            months.setdefault(m, []).append(rec)
-        total = 0
-        results = {}
-        for m in sorted(months.keys()):
-            recs = months[m]
-            res = self.apply_sales_import({"month": m, "records": recs, "file": "sheets-sync"})
-            if not res.get("ok"):
-                return {"ok": False, "error": "导入 %s 失败: %s" % (m, res.get("error"))}
-            total += res.get("rows", 0)
-            results[m] = res.get("rows", 0)
-        return {"ok": True, "months": len(months), "rows": total,
-                "skipped": skipped, "byMonth": results}
-
-    def _fetch_sheet(self, sheet):
-        """拉取指定工作表的 {headers, rows}。成功返回 (data, None),失败返回 (None, error)。"""
-        base = SHEETS_API_URL.split("?")[0]
-        url = base + "?sheet=" + urllib.parse.quote(sheet)
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "BCS-Sync/1.0"})
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                raw = resp.read()
-        except Exception as e:
-            return None, "拉取 %s 失败: %s: %s" % (sheet, type(e).__name__, e)
-        try:
-            data = json.loads(raw.decode("utf-8"))
-        except Exception as e:
-            return None, "%s JSON 解析失败: %s" % (sheet, e)
-        if not data.get("ok"):
-            return None, "%s 接口返回失败: %s" % (sheet, data.get("error") or "")
-        return data, None
-
     def _fetch_quote_sheet(self, sheet):
         """拉取报价工具共享文档指定工作表的 {headers, rows}（合并接口）。成功返回 (data, None)，失败返回 (None, error)。"""
         base = QUOTE_PULL_API_URL.split("?")[0]
@@ -846,42 +771,8 @@ class Api:
                 continue
         return s
 
-    def _restore_reps_from_v66_if_empty(self):
-        """业务分组恢复：仅当本地 reps 表没有任何 group_ 非空行时，才从 V66 Group 表恢复。
-        本地有 Group 数据时不动（手动改的不会被覆盖）；容器重置后 reps 被销售同步补回但 group_ 全空，
-        此时从 V66 恢复 Group。返回 (restored_count, error)。"""
-        try:
-            con = connect()
-            try:
-                n = con.execute(
-                    "SELECT COUNT(*) FROM reps WHERE (deleted IS NULL OR deleted=0) AND group_ IS NOT NULL AND group_<>''"
-                ).fetchone()[0]
-            finally:
-                con.close()
-        except Exception as e:
-            return 0, "检查 reps 表失败: %s" % e
-        if n > 0:
-            return 0, None  # 本地已有 Group，不动
-        data, err = self._fetch_sheet("Group")
-        if err:
-            return 0, err
-        reps = []
-        for r in (data.get("rows") or []):
-            # Sales1：A=Code B=Name C=Group 1；Sales2：F=Code G=Name H=Group 2（两栏并排）
-            c1 = self._cell(r, 0).strip()
-            if c1 and c1.upper() not in ("SALES1 CODE", "CODE"):
-                reps.append({"kind": "s1", "code": c1, "name": self._cell(r, 1), "group": self._cell(r, 2)})
-            c2 = self._cell(r, 5).strip() if len(r) > 5 else ""
-            if c2 and c2.upper() not in ("SALES2 CODE", "CODE"):
-                reps.append({"kind": "s2", "code": c2, "name": self._cell(r, 6) if len(r) > 6 else "",
-                             "group": self._cell(r, 7) if len(r) > 7 else ""})
-        return reps, None
-
     def sync_master_from_sheets(self, scope='all'):
-        """从 Google Sheets 同步主数据:报价文档 Customer -> customers, 报价 Pull 的 SL* 行 -> stock, V66 Group -> reps（仅本地 Group 为空时恢复）。
-        客户资料与石材库存都直接读报价工具共享文档，不再读销售统计表里的 Customer / StoneStock 页签。
-        scope: 'all'（默认，客户+库存全同步）、'customers'（只同步客户）、'stock'（只同步库存）。
-        独立同步只写对应表（apply_master_import 是 upsert，不动其他表）。"""
+        """仅从报价共享文档读取 Customer / Pull；不读取销售表，不修改业务员分组。"""
         scope = (scope or 'all').strip().lower()
         payload = {"customers": [], "stock": [], "reps": []}
         # --- Customer（报价工具共享文档的 Customer 页签）---
@@ -920,14 +811,6 @@ class Api:
                     "itemNo": item_no, "description": self._cell(r, 1),
                     "available": available, "inTransit": in_transit,
                 })
-        # 业务分组恢复：任何 scope 的主数据同步都跑（前端按钮传 customers/stock，不是 all）。
-        # _restore 内部已判断：仅本地 Group 为空时从 V66 Group 表恢复；本地有 Group 时不动。
-        # 注意：Group 在 V66 里（不是报价文档），走 V66 接口 _fetch_sheet。
-        reps_restored, reps_err = self._restore_reps_from_v66_if_empty()
-        if reps_err:
-            return {"ok": False, "error": reps_err}
-        if isinstance(reps_restored, list):
-            payload["reps"] = reps_restored
         # 同步 = 导入式更新（与原来的导入功能一致，只是来源改成远程报价文档）：
         # 新增的加上，已有的用报价文档数据更新，不在报价文档里的本地行保留（不清空）
         res = self.apply_master_import(payload)
@@ -1164,13 +1047,7 @@ def main():
     migrate_local_prefs()
     if os.environ.get("AUTO_SYNC") == "1":
         print("AUTO_SYNC=1,正在从 Google Sheets 同步数据...")
-        # 销售从 V66 读（V66 数据是最新的，服务重启后自动恢复销售）
-        try:
-            res = Api().sync_from_sheets()
-            print("销售同步结果: %s" % json.dumps(res, ensure_ascii=False)[:500])
-        except Exception as e:
-            print("销售同步失败: %s: %s" % (type(e).__name__, e))
-        # 客户/库存从报价文档读（不在 V66 里）
+        # 启动同步也仅处理报价共享文档中的客户和库存。
         try:
             res = Api().sync_master_from_sheets()
             print("主数据同步结果: %s" % json.dumps(res, ensure_ascii=False)[:500])
