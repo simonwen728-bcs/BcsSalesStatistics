@@ -540,6 +540,36 @@ class Api:
             self._category_cache = cache
             return result
 
+    def get_customer_stats_context(self, start="", end="", known_revision=""):
+        """Compact history columns, retaining original row order and exact summation order."""
+        where, params = [], []
+        if start:
+            where.append("sold_date >= ?"); params.append(start)
+        if end:
+            where.append("sold_date <= ?"); params.append(end)
+        condition = " WHERE " + " AND ".join(where) if where else ""
+        with DB_LOCK:
+            con = connect()
+            try:
+                revision = read_data_revision(con)
+                if known_revision and known_revision == revision:
+                    return {"unchanged": True, "revision": revision}
+                key = (revision, start, end)
+                cached = getattr(self, "_customer_stats_cache", None)
+                if cached and cached[0] == key:
+                    return cached[1]
+                rows = con.execute("SELECT sold_date,invoice,cust_no,cust_name,rep1,rep2,type,amount,qty "
+                                   "FROM sales" + condition + " ORDER BY sold_date,invoice,id", params).fetchall()
+                reps = {"s1": [row_to_rep(r) for r in con.execute(
+                    "SELECT * FROM reps WHERE kind='s1' AND (deleted IS NULL OR deleted=0) ORDER BY code")], "s2": []}
+            finally:
+                con.close()
+            fields = ["soldDate", "invoice", "custNo", "custName", "rep1", "rep2", "type", "amount", "qty"]
+            result = {"cols": fields, "rows": [[r[i] or (0 if i>=7 else "") for i in range(9)]
+                                                 for r in rows], "reps": reps, "revision": revision}
+            self._customer_stats_cache = (key, result)
+            return result
+
     def get_history_context(self, start="", end="", filters=None, known_revision=""):
         """Lean history data; preserve original row order and JS report calculations."""
         filters = filters if isinstance(filters, dict) else {}
