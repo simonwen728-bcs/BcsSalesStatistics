@@ -980,7 +980,7 @@ window.STATS = (function () {
     const rg = range(opts.start, opts.end);
     if (!rg.success) return { error: t('statEmpty').replace('{msg}', rg.message) };
     let selectedType = String(opts.type || 'SLAB').trim().toUpperCase();
-    if (selectedType === 'CABINET' || selectedType === 'CABINETOTHERS') {
+    if (isCabinetType(selectedType)) {
       return { error: t('statEmpty').replace('{msg}', 'CABINET not allowed') };
     }
     const spec = baseSpec('石材销量统计');
@@ -988,7 +988,7 @@ window.STATS = (function () {
 
     // 石材销售统计：仅计可用库存，不含在途数量。
     const stockMap = new Map();
-    (opts.stock || []).forEach((s) => {
+    (selectedType === 'SLAB' ? (opts.stock || []) : []).forEach((s) => {
       const key = String(s.itemNo || '').trim().toUpperCase();
       if (!key) return;
       stockMap.set(key, { itemNo: s.itemNo, description: String(s.description || ''), stock: Number(s.available) || 0 });

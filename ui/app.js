@@ -1247,6 +1247,42 @@
     try{window.dispatchEvent(new Event('resize'));}catch(e){}
   }
 
+  async function productContext(opts,known) {
+    const key=JSON.stringify([opts.start || '',opts.end || '']);
+    const cache=S.productSource && S.productSource.key===key ? S.productSource.ctx : null;
+    const ctx=await normalizeCtx(await api('get_product_context',opts.start || '',opts.end || '',known || (cache && cache.revision) || ''));
+    if(ctx.unchanged) {if(known) return ctx;if(cache && cache.revision===ctx.revision)return cache;throw new Error('Product cache unavailable');}
+    S.productSource={key,ctx};return ctx;
+  }
+  function stoneTypeOptions(types) {
+    const opts=[...new Set((types || []).map(v=>String(v || '').trim().toUpperCase()).filter(v=>v && !STATS.helpers.isCabinetType(v)))].sort();
+    if(!opts.includes('SLAB'))opts.unshift('SLAB');
+    return opts;
+  }
+  function renderProductCustomerTemplate(spec,sh,values,off) {
+    const customer=!!spec.customerTemplate,cab=spec.sheet==='橱柜颜色统计';
+    const key=String(spec.sheet),nr=values.length,nc=spec.values[0].length,baseline={};
+    const widths=customer?[100,300,100,150,150,100,150,250,250,400]:cab?[200,120,120,180,120]:[100,100,300,100,100,180,100,100];
+    const left=customer?[1,3,4,7,8,9]:cab?[0]:[2],right=customer?[]:cab?[3]:[5];
+    const formats=[];const col=v=>[...v].reduce((a,c)=>a*26+c.charCodeAt(0)-64,0)-1;
+    (spec.numFmt || []).forEach(f=>{const m=/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/.exec(f.range);if(m)formats.push({r0:+m[2]-1+off,r1:+m[4]-1+off,c0:col(m[1]),c1:col(m[3]),pattern:zhFmt(f.fmt)});});
+    const matrix=values.map((row,r)=>Array.from({length:nc},(_,c)=>{
+      const header=r===off,total=!customer && r===nr-1;
+      const st={bl:r===0 || header || total?1:0,vt:2,ht:r<off?1:header?2:left.includes(c)?1:right.includes(c)?3:2};
+      if(total) st.bg={rgb:'#d9bd8b'};else if(header && !cab)st.bg={rgb:'#d9e6f3'};
+      const f=formats.find(f=>r>=f.r0 && r<=f.r1 && c>=f.c0 && c<=f.c1);if(f)st.n={pattern:f.pattern};
+      if(r<300)baseline[r+':'+c]=st;
+      return {v:row[c]===undefined || row[c]===null?'':row[c],s:st};
+    }));
+    sh.getMergeData().forEach(r=>r.breakApart());sh.getRange(0,0,nr,nc).setValues(matrix);
+    if(off){sh.getRange(0,0,1,nc).merge();sh.getRange(1,0,1,nc).merge();}
+    widths.forEach((w,c)=>sh.setColumnWidth(c,w));sh.showRows(0,nr);sh.setRowHeights(0,nr,30);
+    sh.setFrozenRows(off+1);sh.setFrozenColumns(0);
+    S.appliedLayouts[key]={w:widths,h:{},fz:{y:off+1,x:0}};S.appliedStyles[key]=baseline;
+    S.sheetExtent=S.sheetExtent || {};S.sheetExtent[key]={rows:nr,cols:nc};S.lastRenderedSheet=key;sh.activate();
+    try{window.dispatchEvent(new Event('resize'));}catch(e){}
+  }
+
   function renderCustomerStatsTemplate(spec, sh) {
     const key=String(spec.sheet),nr=spec.values.length,nc=spec.values[0].length;
     const money=[4,7,12],pct=[5,8,10,13,15],baseline={};
@@ -1434,6 +1470,7 @@
     try {
       if (sh.getMaxRows() < need) sh.insertRows(sh.getMaxRows(), need - sh.getMaxRows());
     } catch (e) { /* ignore */ }
+    if(spec.customerTemplate || ['橱柜颜色统计','石材销量统计'].includes(spec.sheet)){renderProductCustomerTemplate(spec,sh,values,off);return;}
     if(spec.salesQueryTemplate) {renderSalesQueryTemplate(spec,sh);return;}
     if (CUSTOMER_BATCH_SHEETS.includes(spec.sheet)) {
       renderCustomerBatchTemplate(spec,sh,values,off);return;
@@ -1691,9 +1728,10 @@
       fields.push({ key: 'category', label: t('dlgCategory'), type: 'combo', options: opts, value: 'ALL' });
     }
     if (def.fields.includes('type')) {
-      const opts = (await ensureTypes()).filter((v) => !STATS.helpers.isCabinetType(v));
-      if (!opts.includes('SLAB')) opts.unshift('SLAB');
-      fields.push({ key: 'type', label: t('dlgType'), type: 'combo', options: opts, value: 'SLAB' });
+      const opts=stoneTypeOptions(await api('get_product_types'));
+      const saved=String((S.statOpts[def.id] || {}).type || '').trim().toUpperCase();
+      S.statOpts[def.id]=Object.assign({},S.statOpts[def.id],{type:opts.includes(saved)?saved:'SLAB'});
+      if(opts.length>1)fields.push({key:'type',label:t('dlgType'),type:'select',options:opts,value:'SLAB'});
     }
     return fields;
   }
@@ -1751,7 +1789,12 @@
     const priorBatch=CUSTOMER_BATCH_IDS.includes(def.id) ? S.statResults[def.id] : null;
     const reusableBatch=priorBatch && !priorBatch.saveFailed && priorBatch.customerBatchAlgorithm===1 && priorBatch.customerBatchRange===batchRange;
     const knownBatchRevision=reusableBatch ? priorBatch.dataRevision || '' : '';
-    const priorFast = reusableAnnual ? priorAnnual : reusablePerformance ? priorPerformance : reusableOrders ? priorOrders : reusableCategory ? priorCategory : reusableHistory ? priorHistory : reusableCustomerStats ? priorCustomerStats : reusableBatch ? priorBatch : null;
+    const isProduct=['cabinetColors','stoneSales'].includes(def.id);
+    const productRange=JSON.stringify([opts.start || '',opts.end || '',opts.type || 'SLAB',opts.includeUniversal===true]);
+    const priorProduct=isProduct ? S.statResults[def.id]:null;
+    const reusableProduct=priorProduct && !priorProduct.saveFailed && priorProduct.productAlgorithm===1 && priorProduct.productRange===productRange;
+    const knownProductRevision=reusableProduct ? priorProduct.dataRevision || '':'';
+    const priorFast = reusableAnnual ? priorAnnual : reusablePerformance ? priorPerformance : reusableOrders ? priorOrders : reusableCategory ? priorCategory : reusableHistory ? priorHistory : reusableCustomerStats ? priorCustomerStats : reusableBatch ? priorBatch : reusableProduct ? priorProduct : null;
     S.ctxCache = null; // 每次重新生成都读取最新数据，避免把旧缓存保存成新报表。
     const ctx = getCtx(opts.start, opts.end) || await (async () => {
       const c = await normalizeCtx(def.id === 'annual' ? await api('get_annual_context', knownAnnualRevision) :
@@ -1761,8 +1804,9 @@
         def.id === 'salesHistory' ? await api('get_history_context', opts.start || '', opts.end || '', {custNo:opts.custNo,itemNo:opts.itemNo,invoice:opts.invoice,sales:opts.sales}, knownHistoryRevision) :
         def.id === 'customerStats' ? await api('get_customer_stats_context', opts.start || '', opts.end || '', knownCustomerStatsRevision) :
         CUSTOMER_BATCH_IDS.includes(def.id) ? await customerBatchContext(opts,knownBatchRevision) :
+        isProduct ? await productContext(opts,knownProductRevision) :
         await api('get_stats_context', opts.start || '', opts.end || ''));
-      if (!CUSTOMER_BATCH_IDS.includes(def.id) && !['annual', 'salesPerformance', 'customerOrders', 'categoryQuery', 'salesHistory', 'customerStats'].includes(def.id)) putCtx(opts.start || '', opts.end || '', c);
+      if (!isProduct && !CUSTOMER_BATCH_IDS.includes(def.id) && !['annual', 'salesPerformance', 'customerOrders', 'categoryQuery', 'salesHistory', 'customerStats'].includes(def.id)) putCtx(opts.start || '', opts.end || '', c);
       return c;
     })();
     const pf1 = performance.now();
@@ -1836,6 +1880,7 @@
       spec.annualWindow = annualWindow;
       spec.annualAlgorithm = 2;
     }
+    if(isProduct){spec.dataRevision=revision;spec.productRange=productRange;spec.productAlgorithm=1;}
     if (CUSTOMER_BATCH_IDS.includes(def.id)) {
       spec.dataRevision=revision;spec.customerBatchRange=batchRange;spec.customerBatchAlgorithm=1;
     }
@@ -2018,6 +2063,7 @@
       row.className = 'cond-row';
       const cur = S.statOpts[def.id][f.key];
       row.innerHTML = '<span>' + esc(f.label) + '</span><input type="' + (f.type === 'combo' ? 'text' : (f.type || 'text')) + '" data-k="' + f.key + '" value="' + esc(cur === undefined ? '' : cur) + '">';
+      if(f.type==='select') row.innerHTML='<span>'+esc(f.label)+'</span><select data-k="'+f.key+'">'+f.options.map(v=>'<option value="'+esc(v)+'"'+(v===cur?' selected':'')+'>'+esc(v)+'</option>').join('')+'</select>';
       row.querySelectorAll('[data-k]').forEach((el) => {
         el.addEventListener('change', () => {
           S.statOpts[def.id][el.dataset.k] = el.value;
@@ -2697,7 +2743,7 @@
   }
   function highlightSheetRow(row) {
     // Native cell/row selection is sufficient; do not persist selection as cell formatting.
-    if(S.sheetCtx && S.sheetCtx.kind==='sales') {S.lastHLRow=null;return;}
+    if(S.sheetCtx && ['sales','customers'].includes(S.sheetCtx.kind)) {S.lastHLRow=null;return;}
     if (S.lastHLRow != null && S.lastHLRow !== row) sheetRowBg(S.lastHLRow, null);
     S.lastHLRow = row;
     if (row != null && row >= 0) sheetRowBg(row, '#dbe9ff');
@@ -2889,16 +2935,19 @@
 
   // ================= customers page =================
   const CUST_COLS = [['no', 'custNo'], ['name', 'custName'], ['sales1', 'colRep1'], ['created', 'custCreated'], ['city', 'colCity'], ['state', 'colState'], ['phone', 'colPhone'], ['contact', 'colContact'], ['type', 'colCustType'], ['email', 'colEmail']];
+  let customerQueryToken=0;
   async function renderCustomers() {
+    const queryToken=++customerQueryToken;
     const tk = 'cust:' + S.dataToken + ':' + (S.custQuery || '');
     if (await activateIfFresh(t('tabCustomers'), tk)) { S.sheetCtx = S.sheetCtxCache[t('tabCustomers')] || null; return; }
     const list = await api('get_all_customers', S.custQuery);
+    if(queryToken!==customerQueryToken)return;
     $('#cust-count').textContent = list.length ? String(list.length) : '';
     const values = [CUST_COLS.map(([, lk]) => t(lk))];
     list.slice(0, 5000).forEach((r) => values.push(CUST_COLS.map(([k]) => (r[k] === null || r[k] === undefined ? '' : r[k]))));
     S.sheetCtx = { kind: 'customers', rows: list.slice(0, 5000), startRow: 1, colCount: CUST_COLS.length };
     S.sheetCtxCache[t('tabCustomers')] = S.sheetCtx;
-    await renderSpec({ sheet: t('tabCustomers'), values, freeze: { rows: 1, cols: 0 } });
+    await renderSpec({ sheet: t('tabCustomers'), values, customerTemplate:true, freeze: { rows: 1, cols: 0 } });
     S.sheetToken[t('tabCustomers')] = tk;
     S.lastHLRow = null;
   }
