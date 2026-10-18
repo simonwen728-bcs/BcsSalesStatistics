@@ -3331,27 +3331,6 @@
       });
     } catch (e) { /* ignore */ }
     $('#sales-import').onclick = importSalesFlow;
-    // 销售页同步：自动从 V66 同步销售数据（按月份替换），不用选文件
-    $('#sales-sync').onclick = async () => {
-      const btn = $('#sales-sync');
-      if (btn.disabled) return;
-      btn.disabled = true;
-      const old = btn.textContent;
-      btn.textContent = '🔄 ' + t('syncing');
-      try {
-        const m = await api('sync_from_sheets');
-        if (!m || !m.ok) throw new Error((m && m.error) || 'sync failed');
-        invalidateCtx();
-        S.salesPage = 0;
-        renderSales();
-        toast(tf('syncSalesDone', { rows: m.rows || 0 }));
-      } catch (e) {
-        toast(t('syncFail') + ': ' + (e && e.message || e));
-      } finally {
-        btn.disabled = false;
-        btn.textContent = old;
-      }
-    };
     $('#sales-delmonth').onclick = () => navigate('history');
     let custTm = null;
     $('#cust-search').addEventListener('input', (e) => { S.custQuery = e.target.value; clearTimeout(custTm); custTm = setTimeout(renderCustomers, 300); });
