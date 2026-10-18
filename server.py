@@ -11,7 +11,7 @@ Render 必须设置 DATABASE_URL；依赖见 requirements.txt。
 """
 import argparse
 import gzip
-import hashlib
+import uuid
 import io
 import json
 import os
@@ -68,6 +68,8 @@ def init_db():
         con = connect()
         try:
             con.executescript(SCHEMA)
+            con.execute("INSERT INTO bcs_prefs(key,value) VALUES (?,?) ON CONFLICT(key) DO NOTHING",
+                        ("dataRevision", json.dumps(uuid.uuid4().hex)))
             con.commit()
         finally:
             con.close()
@@ -136,11 +138,25 @@ def now_str():
 
 # ================= prefs (界面设置:行高列宽等) =================
 
-def prefs_load():
+def bump_data_revision(con):
+    con.execute("INSERT INTO bcs_prefs(key,value) VALUES (?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                ("dataRevision", json.dumps(uuid.uuid4().hex)))
+
+
+def read_data_revision(con):
+    row = con.execute("SELECT value FROM bcs_prefs WHERE key=?", ("dataRevision",)).fetchone()
+    return json.loads(row[0]) if row else "uninitialized"
+
+
+def prefs_load(include_reports=False):
     with DB_LOCK:
         con = connect()
         try:
-            return {r[0]: json.loads(r[1]) for r in con.execute("SELECT key,value FROM bcs_prefs")}
+            sql = "SELECT key,value FROM bcs_prefs"
+            if not include_reports:
+                sql += " WHERE key NOT LIKE 'report:%'"
+            return {r[0]: json.loads(r[1]) for r in con.execute(sql)}
         finally:
             con.close()
 
@@ -247,6 +263,7 @@ class Api:
             con = connect()
             try:
                 con.execute("UPDATE sales SET " + ", ".join(sets) + " WHERE id=?", params)
+                bump_data_revision(con)
                 con.commit()
             finally:
                 con.close()
@@ -294,6 +311,7 @@ class Api:
                     "INSERT OR REPLACE INTO batches (id,month,file,rows,imported_at) VALUES (?,?,?,?,?)",
                     (batch_id, month, file, n, now_str()))
                 synced = self._sync_reps_from_records(con)
+                bump_data_revision(con)
                 con.commit()
             finally:
                 con.close()
@@ -324,6 +342,7 @@ class Api:
             try:
                 con.execute("DELETE FROM sales WHERE batch_id=?", (batch_id,))
                 con.execute("DELETE FROM batches WHERE id=?", (batch_id,))
+                bump_data_revision(con)
                 con.commit()
             finally:
                 con.close()
@@ -340,6 +359,19 @@ class Api:
                  "rows": r["rows"] or 0, "importedAt": r["imported_at"] or ""} for r in rows]
 
     # ---- 统计上下文(报表/客户动态用) ----
+    def get_annual_context(self):
+        # 年度只需要日期、类别、业务员代码和金额；不传客户/库存及其余销售字段。
+        with DB_LOCK:
+            con = connect()
+            try:
+                rows = con.execute("SELECT sold_date,type,rep1,amount FROM sales ORDER BY sold_date,invoice,id").fetchall()
+                revision = read_data_revision(con)
+            finally:
+                con.close()
+        return {"sales": [{"soldDate": r[0] or "", "type": r[1] or "",
+                           "rep1": r[2] or "", "amount": r[3] or 0} for r in rows],
+                "revision": revision}
+
     def get_stats_context(self, start="", end=""):
         """返回报表所需的全部数据。走 HTTP+gzip，不再经过 pywebview 桥(原卡死根因)。"""
         where, params = [], []
@@ -360,6 +392,7 @@ class Api:
                            con.execute("SELECT * FROM reps WHERE kind='s2' AND (deleted IS NULL OR deleted=0) ORDER BY code")]
                 stock = [row_to_stock(r) for r in con.execute("SELECT * FROM stock ORDER BY item_no")]
                 customers = [row_to_customer(r) for r in con.execute("SELECT * FROM customers ORDER BY no")]
+                revision = read_data_revision(con)
             finally:
                 con.close()
         return {
@@ -367,6 +400,7 @@ class Api:
             "reps": {"s1": reps_s1, "s2": reps_s2},
             "stock": stock,
             "customers": customers,
+            "revision": revision,
         }
 
     def get_lookup_data(self):
@@ -455,6 +489,7 @@ class Api:
                      v.get("phone") or "", v.get("contact") or "", v.get("type") or "",
                      v.get("email") or "", (v.get("sales1") or "").strip().upper(),
                      v.get("created") or ""))
+                bump_data_revision(con)
                 con.commit()
             finally:
                 con.close()
@@ -465,6 +500,7 @@ class Api:
             con = connect()
             try:
                 con.execute("DELETE FROM customers WHERE no=?", (no,))
+                bump_data_revision(con)
                 con.commit()
             finally:
                 con.close()
@@ -502,6 +538,7 @@ class Api:
                     in_transit=excluded.in_transit""",
                     (item_no, v.get("description") or "",
                      _num(v.get("available")), _num(v.get("inTransit"))))
+                bump_data_revision(con)
                 con.commit()
             finally:
                 con.close()
@@ -512,6 +549,7 @@ class Api:
             con = connect()
             try:
                 con.execute("DELETE FROM stock WHERE item_no=?", (item_no,))
+                bump_data_revision(con)
                 con.commit()
             finally:
                 con.close()
@@ -544,6 +582,7 @@ class Api:
                     ON CONFLICT(kind,code) DO UPDATE SET
                     name=excluded.name, group_=excluded.group_, deleted=0""",
                     (kind, code, v.get("name") or "", v.get("group") or ""))
+                bump_data_revision(con)
                 con.commit()
             finally:
                 con.close()
@@ -554,6 +593,7 @@ class Api:
             con = connect()
             try:
                 con.execute("UPDATE reps SET deleted=1 WHERE kind=? AND code=?", (kind, code))
+                bump_data_revision(con)
                 con.commit()
             finally:
                 con.close()
@@ -624,6 +664,7 @@ class Api:
                         ON CONFLICT(kind,code) DO UPDATE SET
                         name=excluded.name, group_=excluded.group_, deleted=0""",
                         (kind, code, r.get("name") or "", r.get("group") or ""))
+                bump_data_revision(con)
                 con.commit()
             finally:
                 con.close()
@@ -635,6 +676,7 @@ class Api:
             try:
                 for t in ("sales", "customers", "stock", "reps", "batches"):
                     con.execute("DELETE FROM " + t)
+                bump_data_revision(con)
                 con.commit()
             finally:
                 con.close()
@@ -679,6 +721,7 @@ class Api:
                         con.execute("INSERT OR IGNORE INTO reps (kind,code,name,group_) VALUES ('s2',?,?,?)",
                                     (code, uniq[code], ""))
                         new_s2.append(code)
+                bump_data_revision(con)
                 con.commit()
             finally:
                 con.close()
@@ -687,17 +730,11 @@ class Api:
 
     # 每类报表保留最新快照；存于现有 prefs 表，随数据库备份一同保留。
     def _report_revision(self):
-        digest = hashlib.sha256()
         con = connect()
         try:
-            for table, order in (("sales", "id"), ("customers", "no"),
-                                 ("stock", "item_no"), ("reps", "kind,code")):
-                digest.update(table.encode())
-                for row in con.execute("SELECT * FROM " + table + " ORDER BY " + order):
-                    digest.update(json.dumps(list(row), ensure_ascii=False, default=str).encode())
+            return read_data_revision(con)
         finally:
             con.close()
-        return digest.hexdigest()
 
     def get_report_revision(self):
         with DB_LOCK:
@@ -709,16 +746,37 @@ class Api:
         if not isinstance(spec, dict) or not isinstance(spec.get("values"), list):
             raise ValueError("Invalid report result")
         with DB_LOCK:
-            stale = revision != self._report_revision()
-            record = {"spec": spec, "options": options, "revision": revision}
-            pref_set("report:" + report_id, json.dumps(record, ensure_ascii=False))
+            con = connect()
+            try:
+                stale = revision != read_data_revision(con)
+                record = {"spec": spec, "options": options, "revision": revision}
+                con.execute("INSERT INTO bcs_prefs(key,value) VALUES (?,?) "
+                            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                            ("report:" + report_id, json.dumps(json.dumps(record, ensure_ascii=False), ensure_ascii=False)))
+                con.commit()
+            finally:
+                con.close()
         return {"ok": True, "stale": stale}
+
+    def load_report(self, report_id):
+        if not re.fullmatch(r"[A-Za-z0-9_]{1,60}", report_id or ""):
+            raise ValueError("Invalid report id")
+        with DB_LOCK:
+            con = connect()
+            try:
+                row = con.execute("SELECT value FROM bcs_prefs WHERE key=?", ("report:" + report_id,)).fetchone()
+                record = json.loads(json.loads(row[0])) if row else None
+                if record:
+                    record["spec"]["stale"] = record.get("revision") != read_data_revision(con)
+            finally:
+                con.close()
+        return {"ok": True, "report": record}
 
     def load_reports(self):
         with DB_LOCK:
             revision = self._report_revision()
             reports = {}
-            for key, value in prefs_load().items():
+            for key, value in prefs_load(include_reports=True).items():
                 if not key.startswith("report:"):
                     continue
                 try:
@@ -1098,6 +1156,7 @@ def restore_backup_bytes(raw):
                     if not rows:
                         break
                     dest.executemany(insert, rows)
+            bump_data_revision(dest)
             dest.commit()
         finally:
             if dest is not None:
