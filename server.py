@@ -494,6 +494,52 @@ class Api:
             self._orders_cache = cache
             return result
 
+    def get_category_context(self, start="", end="", known_revision=""):
+        where, params = [], []
+        if start:
+            where.append("sold_date >= ?"); params.append(start)
+        if end:
+            where.append("sold_date <= ?"); params.append(end)
+        condition = " WHERE " + " AND ".join(where) if where else ""
+        with DB_LOCK:
+            con = connect()
+            try:
+                revision = read_data_revision(con)
+                if known_revision and known_revision == revision:
+                    return {"unchanged": True, "revision": revision}
+                cache = getattr(self, "_category_cache", {})
+                key = (revision, start, end)
+                if key in cache:
+                    return cache[key]
+                rows = con.execute("""
+                    WITH source AS (
+                      SELECT sold_date,item_no,description,type,amount,qty,
+                             ROW_NUMBER() OVER (ORDER BY sold_date,invoice,id) AS seq
+                      FROM sales""" + condition + """
+                    ), grouped_source AS (
+                      SELECT *, CASE WHEN LENGTH(sold_date)=10
+                        AND sold_date LIKE '____-__-__'
+                        AND SUBSTR(sold_date,6,2) BETWEEN '01' AND '12'
+                        AND SUBSTR(sold_date,9,2) BETWEEN '01' AND '31'
+                        THEN SUBSTR(sold_date,1,7) ELSE sold_date END AS date_bucket
+                      FROM source
+                    )
+                    SELECT MIN(sold_date),item_no,description,type,SUM(amount),SUM(qty),MIN(seq)
+                    FROM grouped_source
+                    GROUP BY date_bucket,item_no,description,type
+                    ORDER BY MIN(seq)
+                """, params).fetchall()
+            finally:
+                con.close()
+            result = {"sales": [{"soldDate": r[0] or "", "itemNo": r[1] or "", "description": r[2] or "",
+                                  "type": r[3] or "", "amount": r[4] or 0, "qty": r[5] or 0} for r in rows],
+                      "revision": revision}
+            if len(cache) >= 8:
+                cache = {}
+            cache[key] = result
+            self._category_cache = cache
+            return result
+
     def get_stats_context(self, start="", end=""):
         """返回报表所需的全部数据。走 HTTP+gzip，不再经过 pywebview 桥(原卡死根因)。"""
         where, params = [], []
