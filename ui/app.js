@@ -1167,6 +1167,34 @@
     try { window.dispatchEvent(new Event('resize')); } catch(e) { /* ignore */ }
   }
 
+  // Default report conventions: identifiers/counts/ratios 100 centered,
+  // customer names 300 left, money 150 right, headers centered, row height 30.
+  const REPORT_DEFAULT_LAYOUT = Object.freeze({compact:100,customerName:300,money:150,rowHeight:30});
+  function renderCustomerStatsTemplate(spec, sh) {
+    const key=String(spec.sheet),nr=spec.values.length,nc=spec.values[0].length;
+    const money=[4,7,12],pct=[5,8,10,13,15],baseline={};
+    const widths=Array.from({length:nc},(_,c)=>c===1 ? REPORT_DEFAULT_LAYOUT.customerName : money.includes(c) ? REPORT_DEFAULT_LAYOUT.money : REPORT_DEFAULT_LAYOUT.compact);
+    const matrix=spec.values.map((row,r)=>Array.from({length:nc},(_,c)=>{
+      const header=r<2,total=r===2;
+      const st={bl:header || total ? 1:0,vt:2,ht:header ? 2 : c===1 ? 1 : money.includes(c) ? 3 : 2};
+      if(header || total) st.bg={rgb:header ? '#d9e6f3':'#d9bd8b'};
+      if(!header && c>=4) st.n={pattern:zhFmt(money.includes(c) ? '#,##0.00' : pct.includes(c) ? '0.00%' : '#,##0')};
+      if(r<300) baseline[r+':'+c]=st;
+      return {v:row[c]===0 || row[c]===undefined ? '' : row[c],s:st};
+    }));
+    sh.getMergeData().forEach(r=>r.breakApart());
+    sh.getRange(0,0,nr,nc).setValues(matrix);
+    (spec.merges || []).forEach(r=>sh.getRange(r).merge());
+    widths.forEach((w,c)=>sh.setColumnWidth(c,w));
+    sh.showRows(0,nr);sh.setRowHeights(0,nr,REPORT_DEFAULT_LAYOUT.rowHeight);
+    sh.setFrozenRows(3);sh.setFrozenColumns(2);
+    S.appliedLayouts[key]={w:widths,h:{},fz:{y:3,x:2}};
+    S.appliedStyles[key]=baseline;
+    S.sheetExtent=S.sheetExtent || {};S.sheetExtent[key]={rows:nr,cols:nc};
+    S.lastRenderedSheet=key;sh.activate();
+    try {window.dispatchEvent(new Event('resize'));} catch(e) { /* ignore */ }
+  }
+
   function renderHistoryTemplate(spec, sh, values) {
     const key=String(spec.sheet), nr=values.length, nc=spec.values[0].length;
     // Infer old saved report layouts as well as newly generated ones.
@@ -1329,6 +1357,10 @@
     try {
       if (sh.getMaxRows() < need) sh.insertRows(sh.getMaxRows(), need - sh.getMaxRows());
     } catch (e) { /* ignore */ }
+    if (spec.sheet === '客户统计' && !off) {
+      renderCustomerStatsTemplate(spec, sh);
+      return;
+    }
     if (spec.sheet === '销售历史查询' && off===2) {
       renderHistoryTemplate(spec, sh, values);
       return;
@@ -1627,7 +1659,11 @@
     const priorHistory = def.id === 'salesHistory' ? S.statResults[def.id] : null;
     const reusableHistory = priorHistory && !priorHistory.saveFailed && priorHistory.historyAlgorithm===1 && priorHistory.historyRange===historyRange;
     const knownHistoryRevision = reusableHistory ? priorHistory.dataRevision || '' : '';
-    const priorFast = reusableAnnual ? priorAnnual : reusablePerformance ? priorPerformance : reusableOrders ? priorOrders : reusableCategory ? priorCategory : reusableHistory ? priorHistory : null;
+    const customerStatsRange=JSON.stringify([opts.start || '',opts.end || '',opts.scope || 'all']);
+    const priorCustomerStats=def.id==='customerStats' ? S.statResults[def.id] : null;
+    const reusableCustomerStats=priorCustomerStats && !priorCustomerStats.saveFailed && priorCustomerStats.customerStatsAlgorithm===1 && priorCustomerStats.customerStatsRange===customerStatsRange;
+    const knownCustomerStatsRevision=reusableCustomerStats ? priorCustomerStats.dataRevision || '' : '';
+    const priorFast = reusableAnnual ? priorAnnual : reusablePerformance ? priorPerformance : reusableOrders ? priorOrders : reusableCategory ? priorCategory : reusableHistory ? priorHistory : reusableCustomerStats ? priorCustomerStats : null;
     S.ctxCache = null; // 每次重新生成都读取最新数据，避免把旧缓存保存成新报表。
     const ctx = getCtx(opts.start, opts.end) || await (async () => {
       const c = await normalizeCtx(def.id === 'annual' ? await api('get_annual_context', knownAnnualRevision) :
@@ -1635,8 +1671,9 @@
         def.id === 'customerOrders' ? await api('get_orders_context', opts.start || '', opts.end || '', knownOrdersRevision) :
         def.id === 'categoryQuery' ? await api('get_category_context', opts.start || '', opts.end || '', knownCategoryRevision) :
         def.id === 'salesHistory' ? await api('get_history_context', opts.start || '', opts.end || '', {custNo:opts.custNo,itemNo:opts.itemNo,invoice:opts.invoice,sales:opts.sales}, knownHistoryRevision) :
+        def.id === 'customerStats' ? await api('get_customer_stats_context', opts.start || '', opts.end || '', knownCustomerStatsRevision) :
         await api('get_stats_context', opts.start || '', opts.end || ''));
-      if (!['annual', 'salesPerformance', 'customerOrders', 'categoryQuery', 'salesHistory'].includes(def.id)) putCtx(opts.start || '', opts.end || '', c);
+      if (!['annual', 'salesPerformance', 'customerOrders', 'categoryQuery', 'salesHistory', 'customerStats'].includes(def.id)) putCtx(opts.start || '', opts.end || '', c);
       return c;
     })();
     const pf1 = performance.now();
@@ -1709,6 +1746,9 @@
       spec.dataRevision = revision;
       spec.annualWindow = annualWindow;
       spec.annualAlgorithm = 2;
+    }
+    if (def.id === 'customerStats') {
+      spec.dataRevision=revision;spec.customerStatsRange=customerStatsRange;spec.customerStatsAlgorithm=1;
     }
     if (def.id === 'salesHistory') {
       spec.dataRevision=revision;spec.historyRange=historyRange;spec.historyAlgorithm=1;

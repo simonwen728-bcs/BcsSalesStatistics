@@ -798,10 +798,11 @@ window.STATS = (function () {
     [6, 9, 11, 14, 16].forEach((c) => spec.numFmt.push({ range: colLetter(c) + '3:' + colLetter(c) + lastRow, fmt: '0.00%' }));
     [7, 12, 17].forEach((c) => spec.numFmt.push({ range: colLetter(c) + '3:' + colLetter(c) + lastRow, fmt: '#,##0' }));
     [10, 15].forEach((c) => spec.numFmt.push({ range: colLetter(c) + '3:' + colLetter(c) + lastRow, fmt: '#,##0' }));
-    spec.align.push({ range: 'A3:D' + lastRow, horiz: 'left' });
-    spec.align.push({ range: 'E3:Q' + lastRow, horiz: 'right' });
-    spec.align.push({ range: 'C1:D' + lastRow, horiz: 'center' });
-    spec.widths = [[1, 115], [2, 320], [3, 75], [4, 75], [5, 135], [6, 88], [7, 92], [8, 135], [9, 100], [10, 100], [11, 100], [12, 88], [13, 135], [14, 100], [15, 100], [16, 100], [17, 88]];
+    spec.align.push({ range: 'A1:Q2', horiz: 'center' });
+    spec.align.push({ range: 'A3:Q' + lastRow, horiz: 'center' });
+    spec.align.push({ range: 'B3:B' + lastRow, horiz: 'left' });
+    [5,8,13].forEach(c => spec.align.push({range:colLetter(c)+'3:'+colLetter(c)+lastRow,horiz:'right'}));
+    spec.widths = Array.from({length:17},(_,c)=>[c+1,c===1 ? 300 : [4,7,12].includes(c) ? 150 : 100]);
     spec.freeze = { rows: 3, cols: 2 };
     return spec;
   }
