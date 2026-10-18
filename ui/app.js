@@ -2639,6 +2639,9 @@
     });
     const matrix = spec.values.map((row, ri) => row.map((v, ci) => {
       const st={bl:ri===0?1:0,vt:2,bg:{rgb:'#ffffff'},ht:ri===0?2:engKey==='list'?(ci===1?1:ci===2?3:2):([0,4,5].includes(ci)?2:3)};
+      // Explicit borders remain visible on white fill and selected-row fill.
+      const edge={s:1,cl:{rgb:'#b8c4d2'}};
+      st.bd={t:edge,b:edge,l:edge,r:edge};
       const f=fr[ci];if(f && ri>=f.startRow0 && typeof v==='number')st.n={pattern:zhFmt(f.pat)};
       return {v:v===0?'':v,s:st};
     }));
@@ -2738,16 +2741,33 @@
     let footer=document.getElementById('dash-fixed-totals');
     if(!footer){footer=document.createElement('div');footer.id='dash-fixed-totals';footer.style.cssText='height:30px;flex:0 0 30px;overflow:hidden;position:relative;background:#d9e6f3;border-top:1px solid #b5c7db';$('#dash-analysis-panel').appendChild(footer);}
     const vals=[...(S.dash.yearTotal || []),'',...(S.dash.monthTotal || [])];
-    footer.innerHTML=vals.map((v,i)=>'<div data-total-col="'+i+'" style="position:absolute;top:0;height:30px;line-height:30px;padding:0 6px;box-sizing:border-box;border-right:1px solid #c4d0dc;font-weight:bold;white-space:nowrap;text-align:'+([0,4,5].includes(i)?'center':'right')+'">'+esc(typeof v==='number'?fmtMoney(v):v)+'</div>').join('');
+    footer.innerHTML=vals.map((v,i)=>'<div data-total-col="'+i+'" style="visibility:hidden;position:absolute;top:0;height:30px;line-height:30px;padding:0 6px;box-sizing:border-box;border-right:1px solid #a7b7ca;border-bottom:1px solid #a7b7ca;font-weight:bold;white-space:nowrap;text-align:'+([0,4,5].includes(i)?'center':'right')+'">'+esc(typeof v==='number'?fmtMoney(v):v)+'</div>').join('');
     const update=()=>{
       if(S.nav!=='dashboard' || !S.dashEngines)return;
       try{
         const wb=S.dashEngines.ana.api.getActiveWorkbook(),sh=wb.getSheets().find(x=>x.getSheetName()==='客户动态分析');if(!sh)return;
-        const canvas=document.querySelector('#dashAnaMount canvas');if(!canvas)return;
+        // A workbook contains editor/measurement canvases as well as the grid.
+        // The first canvas can be offscreen: anchor to the visible grid instead.
+        const mount=document.getElementById('dashAnaMount'),mr=mount.getBoundingClientRect();
+        const canvas=[...mount.querySelectorAll('canvas')].filter(c=>{
+          const r=c.getBoundingClientRect();
+          return c.clientWidth>0 && c.clientHeight>0 && r.right>mr.left && r.left<mr.right && r.bottom>mr.top && r.top<mr.bottom;
+        }).sort((a,b)=>b.clientWidth*b.clientHeight-a.clientWidth*a.clientHeight)[0];
+        if(!canvas)return;
         const cr=canvas.getBoundingClientRect(),fr=footer.getBoundingClientRect();
+        const cssScale=footer.offsetWidth ? fr.width/footer.offsetWidth : 1;
+        const canvasScale=cr.width/canvas.clientWidth;
         const zoom=sh.getSheet().getZoomRatio() || 1,scroll=wb.getScrollStateBySheetId(sh.getSheetId()) || {};
         const sx=Number(scroll.viewportScrollX) || 0;
-        for(const el of footer.children){const r=sh.getRange(0,Number(el.dataset.totalCol),1,1).getCellRect();el.style.left=(cr.left-fr.left+(r.left-sx)*zoom)+'px';el.style.width=(r.width*zoom)+'px';}
+        const scale=zoom*canvasScale/cssScale,origin=(cr.left-fr.left)/cssScale;
+        const gridLeft=origin+sh.getRange(0,0,1,1).getCellRect().left*scale;
+        for(const el of footer.children){
+          const r=sh.getRange(0,Number(el.dataset.totalCol),1,1).getCellRect();
+          const left=origin+(r.left-sx)*scale,width=r.width*scale;
+          el.style.left=left+'px';el.style.width=width+'px';
+          el.style.clipPath='inset(0 0 0 '+Math.max(0,Math.min(width,gridLeft-left))+'px)';
+          el.style.visibility='visible';
+        }
       }catch(e){ /* initial workbook layout may still be pending */ }
     };
     if(dashTotalsTimer)clearInterval(dashTotalsTimer);dashTotalsTimer=setInterval(update,100);update();
