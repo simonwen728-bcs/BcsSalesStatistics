@@ -2422,16 +2422,17 @@
   // 左=客户列表（竖，带选择勾选框 + 时间范围）；右上=客户销售动态分析（年份表+月份表，横）；
   // 右下=最近12个完整月份销售趋势折线图（横）。对应原 Apps Script「客户动态分析」表布局。
   const PERIOD_KEYS = [['ALL', 'periodAll'], ['LAST_MONTH', 'periodLastMonth'], ['THIS_YEAR', 'periodThisYear'], ['YTD', 'periodYtd']];
-  async function renderDashboard() {
-    loadBar(true);
-    try {
-      const ctx = getCtx('', '') || await (async () => {
-        const c = await normalizeCtx(await api('get_stats_context', '', ''));
-        putCtx('', '', c);
-        return c;
-      })();
-      const dd = STATS.customerDashboardData(ctx.sales, { period: S.dash.period }, ctx.reps);
-      S.dash.cache = dd;
+  let dashboardRenderToken=0;
+  const DASH_SNAPSHOT_KEY='bcs-dashboard-v1';
+  function dashStatus(message) {
+    let el=document.getElementById('dash-status');
+    if(!el){el=document.createElement('span');el.id='dash-status';el.style.cssText='font-size:12px;color:#65758b;margin-left:8px';$('#dash-periods').appendChild(el);}
+    el.textContent=message;
+  }
+  async function drawDashboard() {
+    const dd=S.dash.cache;
+    if(!dd)return;
+    dd.period=S.dash.period;
       // 时间段按钮（对应原表 D1「时间范围」下拉）
       const seg = $('#dash-periods');
       seg.innerHTML = '';
@@ -2439,7 +2440,7 @@
         const b = document.createElement('button');
         b.className = 'btn sm seg-btn' + (S.dash.period === k ? ' primary' : '');
         b.textContent = t(lk);
-        b.onclick = () => { S.dash.period = k; renderDashboard(); };
+        b.onclick = () => { S.dash.period = k; renderDashboard(true); };
         seg.appendChild(b);
       });
       $('#dash-list-title').textContent = t('dashList') + '（' + t(PERIOD_KEYS.find(([k]) => k === S.dash.period)[1]) + '）';
@@ -2459,9 +2460,45 @@
       await renderDashList();
       await renderDashAna();
       renderDashChart();
-    } finally {
-      loadBar(false);
-    }
+  }
+  async function renderDashboard(localOnly=false) {
+    const renderToken=++dashboardRenderToken;
+    const windowKey=isoDate(new Date());
+    loadBar(true);
+    try {
+      if(!S.dash.cache && !S.dash.snapshotLoaded) {
+        S.dash.snapshotLoaded=true;
+        let saved=null;
+        try{saved=JSON.parse(localStorage.getItem(DASH_SNAPSHOT_KEY) || 'null');}catch(e){}
+        if(!saved){try{const r=await api('load_report','customerDashboard');saved=r && r.report && r.report.spec;}catch(e){}}
+        if(renderToken!==dashboardRenderToken)return;
+        if(saved && saved.dashboardAlgorithm===1 && saved.dashboard && saved.dashboard.customers && saved.dashboard.rankings){
+          S.dash.cache=saved.dashboard;S.dash.cacheWindow=saved.dashboardWindow;
+          S.dash.cacheRevision=saved.dataRevision;S.dash.cacheToken=S.dataToken;
+        }
+      }
+      const valid=S.dash.cache && S.dash.cacheToken===S.dataToken && S.dash.cacheWindow===windowKey;
+      if(S.dash.cache) {
+        await drawDashboard();
+        if(localOnly && valid){dashStatus(LANG==='zh'?'已复用当前数据':'Using current data');return;}
+        dashStatus(LANG==='zh'?'已显示保存结果，正在检查更新…':'Showing saved results; checking for updates…');
+        loadBar(false);
+      }
+      const ctx=await normalizeCtx(await api('get_customer_stats_context','','',valid ? S.dash.cacheRevision || '' : ''));
+      if(renderToken!==dashboardRenderToken)return;
+      if(!ctx.unchanged){
+        S.dash.cache=STATS.customerDashboardData(ctx.sales,{period:S.dash.period},ctx.reps);
+        S.dash.cacheRevision=ctx.revision;S.dash.cacheToken=S.dataToken;S.dash.cacheWindow=windowKey;
+        const snapshot={values:[],dashboardAlgorithm:1,dashboard:S.dash.cache,dataRevision:ctx.revision,dashboardWindow:windowKey};
+        try{localStorage.setItem(DASH_SNAPSHOT_KEY,JSON.stringify(snapshot));}catch(e){}
+        trackSave(api('save_report','customerDashboard',snapshot,{},ctx.revision).catch(()=>{}));
+        await drawDashboard();
+      }
+      dashStatus(LANG==='zh'?'数据已更新':'Data is current');
+    } catch(e) {
+      if(S.dash.cache)dashStatus(LANG==='zh'?'当前显示保存结果；检查更新失败，请重新进入重试':'Showing saved results; update check failed');
+      else toast('Load error: '+(e.message || e));
+    } finally {if(renderToken===dashboardRenderToken)loadBar(false);}
   }
 
   // 客户动态两块面板各挂一个独立 Univer 实例（一个画布只能显示一张表，左右面板=两台引擎）。
@@ -2495,7 +2532,7 @@
           if ((no && no !== S.dash.customerNo) || tries >= 6) {
             if (no && no !== S.dash.customerNo) {
               S.dash.customerNo = no;
-              renderDashList().catch(() => { /* ignore */ });
+              updateDashSelection();
               renderDashAna();
               renderDashChart();
             }
@@ -2506,6 +2543,18 @@
         setTimeout(tick, 0);
       }, true);
     } catch (e) { /* ignore */ }
+  }
+
+  function updateDashSelection() {
+    try {
+      const wb=S.dashEngines.list.api.getActiveWorkbook();
+      const sh=wb.getSheets().find(x=>x.getSheetName()==='客户列表');
+      if(!sh)return;
+      if(S.dash.selectedRow!=null)sh.getRange(S.dash.selectedRow,0,1,5).setBackground(null);
+      const pair=Object.entries(S.dash.rowMap || {}).find(([,no])=>no===S.dash.customerNo);
+      S.dash.selectedRow=pair ? Number(pair[0]):null;
+      if(S.dash.selectedRow!=null)sh.getRange(S.dash.selectedRow,0,1,5).setBackground('#dbe9ff');
+    }catch(e){ /* native selection remains available */ }
   }
 
   // Univer UI 会把挂载元素挪到 body 下：拉回面板容器并触发画布重算
@@ -2545,13 +2594,16 @@
     const name = String(spec.sheet);
     const nc = Math.max(...spec.values.map((r) => r.length), 1);
     const old = wb.getSheets().find((x) => { try { return x.getSheetName() === name; } catch (e) { return false; } }) || null;
+    let sh=old;
+    // Reuse the fixed dashboard template without rescanning manual styles on each customer click.
+    if(!old || old.getMaxRows()<spec.values.length || old.getMaxColumns()<nc) {
     // 先建 ~tmp 表、激活、删旧表、再改回正名：避开「删激活表被静默拒绝」「同名自动改名(1)」两个坑
     const tmpId = 'dsh_' + Date.now() + '_' + Math.floor(Math.random() * 10000);
     await eng.api.executeCommand('sheet.command.insert-sheet', {
       unitId: wb.getId(),
       sheet: { id: tmpId, name: name + '~tmp', rowCount: Math.max(spec.values.length + 20, 60), columnCount: Math.max(nc + 4, 10) },
     });
-    let sh = wb.getSheets().find((x) => x.getSheetId() === tmpId);
+    sh = wb.getSheets().find((x) => x.getSheetId() === tmpId);
     if (!sh) return;
     try { sh.activate(); } catch (e) { /* ignore */ }
     if (old) {
@@ -2567,6 +2619,15 @@
     if (blank) {
       try { await eng.api.executeCommand('sheet.command.remove-sheet', { unitId: wb.getId(), subUnitId: blank.getSheetId() }); } catch (e) { /* ignore */ }
     }
+    } else {
+      const extent=(S.dash.sheetExtents || {})[engKey];
+      if(extent && extent.rows>spec.values.length) {
+        const tail=sh.getRange(spec.values.length,0,extent.rows-spec.values.length,extent.cols);
+        tail.clearContent();tail.clearFormat();
+      }
+    }
+    S.dash.sheetExtents=S.dash.sheetExtents || {};
+    S.dash.sheetExtents[engKey]={rows:spec.values.length,cols:nc};
     // 矩阵构造：0→空串（全套系统口径），numFmt 列金额格式随值写入
     const colIdx = (s) => { let n2 = 0; for (const ch of s) n2 = n2 * 26 + (ch.charCodeAt(0) - 64); return n2 - 1; };
     const fr = {};
@@ -2577,32 +2638,19 @@
       for (let c = c1; c <= c2; c++) fr[c] = { startRow0: Number(m[2]) - 1, pat: f.fmt };
     });
     const matrix = spec.values.map((row, ri) => row.map((v, ci) => {
-      if (v === 0) return '';
-      const f = fr[ci];
-      if (f && ri >= f.startRow0 && typeof v === 'number') return { v, s: { n: { pattern: zhFmt(f.pat) } } };
-      return v;
+      const st={bl:ri===0?1:0,vt:2,bg:{rgb:'#ffffff'},ht:ri===0?2:engKey==='list'?(ci===1?1:ci===2?3:2):([0,4,5].includes(ci)?2:3)};
+      const f=fr[ci];if(f && ri>=f.startRow0 && typeof v==='number')st.n={pattern:zhFmt(f.pat)};
+      return {v:v===0?'':v,s:st};
     }));
     try { sh.getRange(0, 0, matrix.length, nc).setValues(matrix); } catch (e) { /* ignore */ }
     try { sh.getRange(0, 0, 1, nc).setFontWeight('bold'); } catch (e) { /* ignore */ }
     (spec.bg || []).forEach((b) => { try { sh.getRange(b.range).setBackground(b.color); } catch (e) { /* ignore */ } });
     (spec.bold || []).forEach((rg) => { try { sh.getRange(rg).setFontWeight('bold'); } catch (e) { /* ignore */ } });
-    // 自适应列宽（全量内容，小表不用采样），用户记忆值优先
-    const unitW = (v) => { let w = 0; for (const ch of String(v === null || v === undefined ? '' : v)) w += ch.charCodeAt(0) > 255 ? 2 : 1; return w; };
-    const layKey = name;
-    const savedRaw = S.sheetLayouts[layKey];
-    const savedLay = Array.isArray(savedRaw) ? { w: savedRaw, h: {} } : (savedRaw || null);
-    const finalWidths = [];
-    for (let c = 0; c < nc; c++) {
-      let u = 0;
-      for (const row of spec.values) { const w = unitW(row[c]); if (w > u) u = w; }
-      let wd = Math.max(56, Math.min(420, Math.round(u * 8.4 * 1.25) + 26));
-      if (savedLay && savedLay.w && typeof savedLay.w[c] === 'number' && savedLay.w[c] >= 40) wd = savedLay.w[c];
-      try { sh.setColumnWidth(c, wd); } catch (e) { /* ignore */ }
-      finalWidths.push(wd);
-    }
-    // 行高：表头 30、数据 26，用户记忆值覆盖
-    try { sh.setRowHeights(0, 1, 30); } catch (e) { /* ignore */ }
-    if (matrix.length > 1) { try { sh.setRowHeights(1, matrix.length - 1, 26); } catch (e) { /* ignore */ } }
+    const layKey=name;
+    const savedLay=null;
+    const finalWidths=engKey==='list'?[100,400,150,80,80]:[100,200,200,200,100,100,200,200,200];
+    finalWidths.forEach((w,c)=>sh.setColumnWidth(c,w));
+    sh.setRowHeights(0,matrix.length,30);
     const appliedH = {};
     if (savedLay && savedLay.h) {
       Object.entries(savedLay.h).forEach(([ri, h]) => {
@@ -2617,12 +2665,6 @@
     let fz = spec.freeze ? { y: spec.freeze.rows || 0, x: spec.freeze.cols || 0 } : null;
     if (savedLay && savedLay.fz && (savedLay.fz.y || savedLay.fz.x)) fz = { y: savedLay.fz.y || 0, x: savedLay.fz.x || 0 };
     if (fz && (fz.y || fz.x)) { try { sh.setFrozenRows(fz.y || 0); } catch (e) { /* ignore */ } try { sh.setFrozenColumns(fz.x || 0); } catch (e) { /* ignore */ } }
-    // 用户修饰回放（只写样式不动值）+ 记录基线（供离开/关闭时差分保存）
-    const userSt = S.userStyles[layKey] || {};
-    Object.entries(userSt).forEach(([k, styleObj]) => {
-      const parts = k.split(':');
-      try { sh.getRange(Number(parts[0]), Number(parts[1]), 1, 1).setValues([[{ s: styleObj }]]); } catch (e) { /* ignore */ }
-    });
     S.appliedLayouts[layKey] = { w: finalWidths, h: appliedH, fz };
     S.appliedStyles[layKey] = captureCellStyles(sh);
     try { sh.activate(); } catch (e) { /* ignore */ }
@@ -2649,6 +2691,7 @@
     spec.bg.push({ range: 'A1:E1', color: '#d9eaf7' });
     if (selRow) spec.bg.push({ range: 'A' + selRow + ':E' + selRow, color: '#dbe9ff' });
     await renderDashSheet('list', spec);
+    S.dash.selectedRow=selRow ? selRow-1:null;
   }
 
   // 右上面板：年份表（全部历史，A:D）+ 最近12个完整月表（F:I），各带合计行
@@ -2658,6 +2701,7 @@
     const titleEl = $('#dash-cust-title');
     if (titleEl) titleEl.textContent = cust ? cust.no + '  ' + cust.name : '';
     const moneyHead = (first) => [first, t('dashTotalAmt'), t('dashCabinetAmt'), t('dashStoneAmt')];
+    S.dash.yearTotal=[t('total'),'','',''];S.dash.monthTotal=[t('total'),'','',''];
     const yearRows = [moneyHead(t('dashYear'))];
     const monthRows = [moneyHead(t('dashMonth'))];
     if (cust) {
@@ -2666,13 +2710,13 @@
         const m = cust.years[yr]; yt += m.total; yc += m.cabinet; ys += m.stone;
         yearRows.push([yr, m.total, m.cabinet, m.stone]);
       });
-      yearRows.push([t('total'), yt, yc, ys]);
+      S.dash.yearTotal=[t('total'),yt,yc,ys];
       let tt = 0, tc = 0, ts = 0;
       dd.monthKeys.forEach((mk) => {
         const m = cust.months[mk]; tt += m.total; tc += m.cabinet; ts += m.stone;
         monthRows.push([mk, m.total, m.cabinet, m.stone]);
       });
-      monthRows.push([t('total'), tt, tc, ts]);
+      S.dash.monthTotal=[t('total'),tt,tc,ts];
     }
     const nR = Math.max(yearRows.length, monthRows.length, 1);
     const values = [];
@@ -2684,16 +2728,36 @@
     if (yearRows.length > 1) spec.numFmt.push({ range: 'B2:D' + yearRows.length, fmt: money });
     if (monthRows.length > 1) spec.numFmt.push({ range: 'G2:I' + monthRows.length, fmt: money });
     spec.bg.push({ range: 'A1:D1', color: '#d9eaf7' }, { range: 'F1:I1', color: '#d9eaf7' });
-    if (yearRows.length > 1) spec.bold.push(rngA(yearRows.length, 1, yearRows.length, 4));
-    if (monthRows.length > 1) spec.bold.push(rngA(monthRows.length, 6, monthRows.length, 9));
+
     await renderDashSheet('ana', spec);
+    renderDashTotals();
+  }
+
+  let dashTotalsTimer=null;
+  function renderDashTotals() {
+    let footer=document.getElementById('dash-fixed-totals');
+    if(!footer){footer=document.createElement('div');footer.id='dash-fixed-totals';footer.style.cssText='height:30px;flex:0 0 30px;overflow:hidden;position:relative;background:#d9e6f3;border-top:1px solid #b5c7db';$('#dash-analysis-panel').appendChild(footer);}
+    const vals=[...(S.dash.yearTotal || []),'',...(S.dash.monthTotal || [])];
+    footer.innerHTML=vals.map((v,i)=>'<div data-total-col="'+i+'" style="position:absolute;top:0;height:30px;line-height:30px;padding:0 6px;box-sizing:border-box;border-right:1px solid #c4d0dc;font-weight:bold;white-space:nowrap;text-align:'+([0,4,5].includes(i)?'center':'right')+'">'+esc(typeof v==='number'?fmtMoney(v):v)+'</div>').join('');
+    const update=()=>{
+      if(S.nav!=='dashboard' || !S.dashEngines)return;
+      try{
+        const wb=S.dashEngines.ana.api.getActiveWorkbook(),sh=wb.getSheets().find(x=>x.getSheetName()==='客户动态分析');if(!sh)return;
+        const canvas=document.querySelector('#dashAnaMount canvas');if(!canvas)return;
+        const cr=canvas.getBoundingClientRect(),fr=footer.getBoundingClientRect();
+        const zoom=sh.getSheet().getZoomRatio() || 1,scroll=wb.getScrollStateBySheetId(sh.getSheetId()) || {};
+        const sx=Number(scroll.viewportScrollX) || 0;
+        for(const el of footer.children){const r=sh.getRange(0,Number(el.dataset.totalCol),1,1).getCellRect();el.style.left=(cr.left-fr.left+(r.left-sx)*zoom)+'px';el.style.width=(r.width*zoom)+'px';}
+      }catch(e){ /* initial workbook layout may still be pending */ }
+    };
+    if(dashTotalsTimer)clearInterval(dashTotalsTimer);dashTotalsTimer=setInterval(update,100);update();
   }
 
   function renderDashChart() {
     const dd = S.dash.cache;
     const cust = dd.customers[S.dash.customerNo];
     const el = document.getElementById('dash-chart');
-    if (!cust || !el) return;
+    if (!cust || !el) {if(S.dash.chart)S.dash.chart.clear();return;}
     if (!window.echarts) return;
     if (!S.dash.chart || S.dash.chart._dom !== el) S.dash.chart = window.echarts.init(el);
     const totals = dd.monthKeys.map((mk) => cust.months[mk].total);
