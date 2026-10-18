@@ -441,6 +441,59 @@ class Api:
             self._performance_cache = cache
             return result
 
+    def get_orders_context(self, start="", end="", known_revision=""):
+        where, params = [], []
+        if start:
+            where.append("sold_date >= ?"); params.append(start)
+        if end:
+            where.append("sold_date <= ?"); params.append(end)
+        condition = " WHERE " + " AND ".join(where) if where else ""
+        with DB_LOCK:
+            con = connect()
+            try:
+                revision = read_data_revision(con)
+                if known_revision and known_revision == revision:
+                    return {"unchanged": True, "revision": revision}
+                cache = getattr(self, "_orders_cache", {})
+                key = (revision, start, end)
+                if key in cache:
+                    return cache[key]
+                # 正负分组避免相抵后丢失原本应显示的零净额业务员。
+                # seq 保留缺失分组时首次出现的业务员名称选择顺序。
+                rows = con.execute("""
+                    WITH source AS (
+                      SELECT sold_date,rep1,rep2,rep1_name,invoice,cust_no,type,amount,
+                             ROW_NUMBER() OVER (ORDER BY sold_date,invoice,id) AS seq
+                      FROM sales""" + condition + """
+                    ), grouped_source AS (
+                      SELECT *, CASE WHEN LENGTH(sold_date)=10
+                        AND sold_date LIKE '____-__-__'
+                        AND SUBSTR(sold_date,6,2) BETWEEN '01' AND '12'
+                        AND SUBSTR(sold_date,9,2) BETWEEN '01' AND '31'
+                        THEN '' ELSE sold_date END AS date_bucket,
+                        CASE WHEN amount>0 THEN 1 WHEN amount<0 THEN -1 ELSE 0 END AS amount_sign
+                      FROM source
+                    )
+                    SELECT MIN(sold_date),rep1,rep2,rep1_name,SUM(amount),invoice,cust_no,type,MIN(seq)
+                    FROM grouped_source
+                    GROUP BY date_bucket,rep1,rep2,rep1_name,invoice,cust_no,type,amount_sign
+                    ORDER BY MIN(seq)
+                """, params).fetchall()
+                reps = {kind: [row_to_rep(r) for r in con.execute(
+                    "SELECT * FROM reps WHERE kind=? AND (deleted IS NULL OR deleted=0) ORDER BY code", (kind,))]
+                    for kind in ("s1", "s2")}
+            finally:
+                con.close()
+            result = {"sales": [{"soldDate": r[0] or "", "rep1": r[1] or "", "rep2": r[2] or "",
+                                  "rep1Name": r[3] or "", "amount": r[4] or 0,
+                                  "invoice": r[5] or "", "custNo": r[6] or "", "type": r[7] or ""} for r in rows],
+                      "reps": reps, "revision": revision}
+            if len(cache) >= 8:
+                cache = {}
+            cache[key] = result
+            self._orders_cache = cache
+            return result
+
     def get_stats_context(self, start="", end=""):
         """返回报表所需的全部数据。走 HTTP+gzip，不再经过 pywebview 桥(原卡死根因)。"""
         where, params = [], []
