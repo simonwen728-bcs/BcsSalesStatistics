@@ -2596,12 +2596,12 @@
     const old = wb.getSheets().find((x) => { try { return x.getSheetName() === name; } catch (e) { return false; } }) || null;
     let sh=old;
     // Reuse the fixed dashboard template without rescanning manual styles on each customer click.
-    if(!old || old.getMaxRows()<spec.values.length || old.getMaxColumns()<nc) {
+    if(!old || old.getMaxRows()<spec.values.length || old.getMaxColumns()<nc || (engKey==='ana' && old.getMaxRows()!==14)) {
     // 先建 ~tmp 表、激活、删旧表、再改回正名：避开「删激活表被静默拒绝」「同名自动改名(1)」两个坑
     const tmpId = 'dsh_' + Date.now() + '_' + Math.floor(Math.random() * 10000);
     await eng.api.executeCommand('sheet.command.insert-sheet', {
       unitId: wb.getId(),
-      sheet: { id: tmpId, name: name + '~tmp', rowCount: Math.max(spec.values.length + 20, 60), columnCount: Math.max(nc + 4, 10) },
+      sheet: { id: tmpId, name: name + '~tmp', rowCount: engKey==='ana'?14:Math.max(spec.values.length + 20, 60), columnCount: engKey==='ana'?9:Math.max(nc + 4, 10) },
     });
     sh = wb.getSheets().find((x) => x.getSheetId() === tmpId);
     if (!sh) return;
@@ -2654,6 +2654,7 @@
     const finalWidths=engKey==='list'?[100,400,150,80,80]:[100,200,200,200,100,100,200,200,200];
     finalWidths.forEach((w,c)=>sh.setColumnWidth(c,w));
     sh.setRowHeights(0,matrix.length,30);
+    if(engKey==='ana')sh.setRowHeight(13,44); // reserved space beneath fixed summary
     const appliedH = {};
     if (savedLay && savedLay.h) {
       Object.entries(savedLay.h).forEach(([ri, h]) => {
@@ -2709,19 +2710,20 @@
     const monthRows = [moneyHead(t('dashMonth'))];
     if (cust) {
       let yt = 0, yc = 0, ys = 0;
-      Object.keys(cust.years || {}).sort().forEach((yr) => {
+      const currentYear=new Date().getFullYear();
+      Object.keys(cust.years || {}).filter(yr=>Number(yr)>=currentYear-11 && Number(yr)<=currentYear).sort().forEach((yr) => {
         const m = cust.years[yr]; yt += m.total; yc += m.cabinet; ys += m.stone;
         yearRows.push([yr, m.total, m.cabinet, m.stone]);
       });
       S.dash.yearTotal=[t('total'),yt,yc,ys];
       let tt = 0, tc = 0, ts = 0;
-      dd.monthKeys.forEach((mk) => {
+      dd.monthKeys.slice(-12).forEach((mk) => {
         const m = cust.months[mk]; tt += m.total; tc += m.cabinet; ts += m.stone;
         monthRows.push([mk, m.total, m.cabinet, m.stone]);
       });
       S.dash.monthTotal=[t('total'),tt,tc,ts];
     }
-    const nR = Math.max(yearRows.length, monthRows.length, 1);
+    const nR = 13; // one fixed header plus twelve detail rows; summary is pinned separately
     const values = [];
     for (let i = 0; i < nR; i++) values.push(['', '', '', '', '', '', '', '', '']);   // A..I（E 列空档）
     yearRows.forEach((r, i) => { for (let c = 0; c < 4; c++) values[i][c] = r[c]; });
