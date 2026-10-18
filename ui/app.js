@@ -1292,6 +1292,7 @@
     S.appliedStyles[layKey] = captureCellStyles(sh);
     __t('replayUserFmt');   // 用户样式回放+基线+冻结合计
     // 激活目标表并强制视图重绑：页签栏已隐藏，切换渲染面只能靠程序保证（activate + resize）
+    if (spec.yearGroups) applyAnnualGroups(spec, sh);
     S.lastRenderedSheet = name;
     try { sh.activate(); } catch (e) { /* ignore */ }
     __t('activate');
@@ -1652,6 +1653,7 @@
     // 切换报表必须切到它自己的表格：
     //  - 有最近一次结果 → 重铺（重绘矩阵，不重算）
     //  - 没有结果（从未生成/数据变更后被清）→ 铺该报表自己的空表，绝不停留在别的功能的表上
+    S.yearToggle = cached && cached.yearGroups ? { sheet: cached.sheet, groups: cached.yearGroups } : null;
     if (cached) {
       // 数据未变（token 命中）→ 纯激活，避免整张重铺卡顿；否则重铺缓存矩阵
       if (!await activateIfFresh(cached.sheet, 'stat:' + S.dataToken)) {
@@ -2279,24 +2281,44 @@
     S.lastHLRow = row;
     if (row != null && row >= 0) sheetRowBg(row, '#dbe9ff');
   }
+  // Keep display arrows out of spec.values so Excel export stays unchanged.
+  function applyAnnualGroups(spec, sh) {
+    spec.yearGroups.forEach((g) => {
+      if (!g.months || !g.months.length) return;
+      if (typeof g.collapsed !== 'boolean') g.collapsed = true;
+      const first = g.months[0] - 1;
+      if (g.collapsed) sh.hideRows(first, g.months.length);
+      else sh.showRows(first, g.months.length);
+      g.label = String(spec.values[g.row - 1][0]);
+      sh.getRange(g.row - 1, 0, 1, 1).setValues([[(g.collapsed ? '+ ' : '− ') + g.label]]);
+    });
+    S.yearToggle = { sheet: spec.sheet, groups: spec.yearGroups };
+  }
+
+  let lastAnnualClick = { sheet: '', row: -1, at: -Infinity };
   function onSheetCell(row) {
-    // 年度销售总表：点击年份行 → 折叠/展开该年月份行（行高 26↔0）
-    try {
-      if (S.nav === 'r:annual' && S.yearToggle && row !== null && row !== undefined) {
-        const g = (S.yearToggle.groups || []).find((x) => x.row === row + 1);   // row 0 基 → 1 基
-        if (g) {
-          const wbY = S.u.api.getActiveWorkbook();
-          const shY = wbY.getSheets().find((x) => { try { return x.getSheetName() === S.yearToggle.sheet; } catch (e) { return false; } });
-          if (shY) {
-            g.collapsed = !g.collapsed;
-            // 原生行隐藏：行高 0 会被引擎钳到最小值，hideRows/showRows 才是真隐藏
-            const first = g.months[0] - 1, count = g.months.length;
-            try { if (g.collapsed) shY.hideRows(first, count); else shY.showRows(first, count); } catch (e) { /* ignore */ }
-          }
-          return;   // 年份行不进入行选中逻辑
+    if (S.nav === 'r:annual' && S.yearToggle && row != null) {
+      const state = S.yearToggle;
+      const g = (state.groups || []).find((x) => x.row === row + 1);
+      if (g && g.months && g.months.length) {
+        const now = performance.now();
+        // CellClicked and the mouseup fallback can report the same click.
+        if (lastAnnualClick.sheet === state.sheet && lastAnnualClick.row === row && now - lastAnnualClick.at < 180) return;
+        lastAnnualClick = { sheet: state.sheet, row, at: now };
+        try {
+          const sh = S.u.api.getActiveWorkbook().getSheets().find((x) => x.getSheetName() === state.sheet);
+          if (!sh) return;
+          const collapsed = !g.collapsed;
+          const ok = collapsed ? sh.hideRows(g.months[0] - 1, g.months.length) : sh.showRows(g.months[0] - 1, g.months.length);
+          if (ok === false) throw new Error('Unable to change month visibility');
+          g.collapsed = collapsed;
+          if (g.label != null) sh.getRange(g.row - 1, 0, 1, 1).setValues([[(collapsed ? '+ ' : '− ') + g.label]]);
+        } catch (e) {
+          toast(LANG === 'zh' ? '月份折叠失败，请重新生成报表。' : 'Could not toggle months. Please regenerate the report.');
         }
+        return;
       }
-    } catch (e) { /* ignore */ }
+    }
     const ctx = S.sheetCtx;
     if (!ctx || row === null || row === undefined || row < ctx.startRow) return;
     const idx = row - ctx.startRow;
