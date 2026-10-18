@@ -540,6 +540,46 @@ class Api:
             self._category_cache = cache
             return result
 
+    def get_history_context(self, start="", end="", filters=None, known_revision=""):
+        """Lean history data; preserve original row order and JS report calculations."""
+        filters = filters if isinstance(filters, dict) else {}
+        where, params = [], []
+        if start:
+            where.append("sold_date >= ?"); params.append(start)
+        if end:
+            where.append("sold_date <= ?"); params.append(end)
+        condition = " WHERE " + " AND ".join(where) if where else ""
+        with DB_LOCK:
+            con = connect()
+            try:
+                revision = read_data_revision(con)
+                if known_revision and known_revision == revision:
+                    return {"unchanged": True, "revision": revision}
+                key = (revision, start, end)
+                cached = getattr(self, "_history_source", None)
+                if cached and cached[0] == key:
+                    sales, reps = cached[1], cached[2]
+                else:
+                    fields = ["soldDate", "invoice", "itemNo", "description", "color", "type",
+                              "custNo", "custName", "rep1", "rep2", "qty", "amount", "cost"]
+                    rows = con.execute("SELECT sold_date,invoice,item_no,description,color,type,"
+                        "cust_no,cust_name,rep1,rep2,qty,amount,cost FROM sales" + condition +
+                        " ORDER BY sold_date,invoice,id", params).fetchall()
+                    sales = [dict(zip(fields, [r[i] if r[i] is not None else (0 if i >= 10 else "")
+                                               for i in range(len(fields))])) for r in rows]
+                    reps = {"s1": [row_to_rep(r) for r in con.execute(
+                        "SELECT * FROM reps WHERE kind='s1' AND (deleted IS NULL OR deleted=0) ORDER BY code")], "s2": []}
+                    self._history_source = (key, sales, reps)
+            finally:
+                con.close()
+            # Use Unicode normalization equivalent to the report, including padded imported codes.
+            wanted = [(field, str(filters.get(option) or "").strip().upper()) for option, field in
+                      [("invoice", "invoice"), ("itemNo", "itemNo"), ("custNo", "custNo"), ("sales", "rep1")]]
+            wanted = [(field, value) for field, value in wanted if value]
+            selected = [r for r in sales if all(str(r[field] or "").strip().upper() == value
+                                               for field, value in wanted)] if wanted else sales
+            return {"sales": selected, "reps": reps, "revision": revision}
+
     def get_stats_context(self, start="", end=""):
         """返回报表所需的全部数据。走 HTTP+gzip，不再经过 pywebview 桥(原卡死根因)。"""
         where, params = [], []
