@@ -986,12 +986,12 @@ window.STATS = (function () {
     const spec = baseSpec('石材销量统计');
     const groupMap = sales1Groups(opts.reps || { s1: [], s2: [] });
 
-    // inventory map: StoneStock page: Stock = available + inTransit
+    // 石材销售统计：仅计可用库存，不含在途数量。
     const stockMap = new Map();
     (opts.stock || []).forEach((s) => {
       const key = String(s.itemNo || '').trim().toUpperCase();
       if (!key) return;
-      stockMap.set(key, { itemNo: s.itemNo, description: String(s.description || ''), stock: (Number(s.available) || 0) + (Number(s.inTransit) || 0) });
+      stockMap.set(key, { itemNo: s.itemNo, description: String(s.description || ''), stock: Number(s.available) || 0 });
     });
     // description map from sales (Search_List equivalent)
     const descMap = new Map();
