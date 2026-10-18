@@ -1210,6 +1210,8 @@ window.STATS = (function () {
     const fmtDate = (s) => { const p = String(s).split('-'); return p.length === 3 ? p[1] + '/' + p[2] + '/' + p[0] : s; };
     const periodText = (rg.start ? fmtDate(rg.start) : 'All History') + ' - ' + (rg.end ? fmtDate(rg.end) : 'Today');
     const spec = baseSpec('销售历史查询');
+    spec.historyView = sales1F ? 'sales' : invoiceF ? 'invoice' : itemF ? 'item' : custF ? 'customer' : 'all';
+    spec.freeze = {rows:1, cols:0};
     const money = '#,##0.00;-#,##0.00;';
     const qtyFmt = '#,##0;-#,##0;';
 

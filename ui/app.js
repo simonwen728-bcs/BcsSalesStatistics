@@ -1167,6 +1167,46 @@
     try { window.dispatchEvent(new Event('resize')); } catch(e) { /* ignore */ }
   }
 
+  function renderHistoryTemplate(spec, sh, values) {
+    const key=String(spec.sheet), nr=values.length, nc=spec.values[0].length;
+    // Infer old saved report layouts as well as newly generated ones.
+    const view=spec.historyView || (nc===7 ? 'customer' : nc===8 ? 'sales' : nc===9 ? 'invoice' : spec.values[0][0]==='Item No.' ? 'item' : 'all');
+    const layouts={
+      all:{w:[100,100,100,100,120,100,250,100,100,120],left:[6],right:[4,9]},
+      customer:{w:[100,100,100,100,120,100,120],left:[],right:[4,6]},
+      item:{w:[100,300,100,100,100,120,100,300,100,120],left:[1,7],right:[5,9]},
+      invoice:{w:[100,100,300,100,100,100,100,120,120],left:[2],right:[7,8]},
+      sales:{w:[100,120,100,100,120,100,300,120],left:[6],right:[4,7]}
+    };
+    const layout=layouts[view], baseline={}, formats=[];
+    const col=(v)=>[...v].reduce((a,c)=>a*26+c.charCodeAt(0)-64,0)-1;
+    (spec.numFmt || []).forEach(f=>{
+      const m=/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/.exec(f.range);
+      if(m) formats.push({r0:+m[2]+1,r1:+m[4]+1,c0:col(m[1]),c1:col(m[3]),pattern:zhFmt(f.fmt)});
+    });
+    const matrix=values.map((row,r)=>Array.from({length:nc},(_,c)=>{
+      const header=r===2, total=r===nr-1;
+      const st={bl:r===0 || header || total ? 1:0,vt:2,
+        ht:r<2 ? 1 : header ? 2 : layout.left.includes(c) ? 1 : layout.right.includes(c) ? 3 : 2};
+      if(header || total) st.bg={rgb:header ? '#d9eaf7':'#d9e6f3'};
+      const f=formats.find(f=>r>=f.r0 && r<=f.r1 && c>=f.c0 && c<=f.c1);
+      if(f) st.n={pattern:f.pattern};
+      if(r<300) baseline[r+':'+c]=st;
+      return {v:row[c]===0 || row[c]===undefined ? '' : (r===1 ? String(row[c]).replace(/\n/g,' | ') : row[c]),s:st};
+    }));
+    sh.getMergeData().forEach(r=>r.breakApart());
+    sh.getRange(0,0,nr,nc).setValues(matrix);
+    sh.getRange(0,0,1,nc).merge();sh.getRange(1,0,1,nc).merge();
+    layout.w.forEach((w,c)=>sh.setColumnWidth(c,w));
+    sh.showRows(0,nr);sh.setRowHeights(0,nr,30);
+    sh.setFrozenRows(3);sh.setFrozenColumns(0);
+    S.appliedLayouts[key]={w:layout.w,h:{},fz:{y:3,x:0}};
+    S.appliedStyles[key]=baseline;
+    S.sheetExtent=S.sheetExtent || {};S.sheetExtent[key]={rows:nr,cols:nc};
+    S.lastRenderedSheet=key;sh.activate();
+    try {window.dispatchEvent(new Event('resize'));} catch(e) { /* ignore */ }
+  }
+
   function renderCategoryTemplate(spec, sh) {
     const nr=spec.values.length, nc=spec.values[0].length, key=String(spec.sheet);
     const user=S.userStyles[key] || {}, baseline={};
@@ -1289,6 +1329,10 @@
     try {
       if (sh.getMaxRows() < need) sh.insertRows(sh.getMaxRows(), need - sh.getMaxRows());
     } catch (e) { /* ignore */ }
+    if (spec.sheet === '销售历史查询' && off===2) {
+      renderHistoryTemplate(spec, sh, values);
+      return;
+    }
     if (spec.sheet === '销售查询' && !off) {
       renderCategoryTemplate(spec, sh);
       return;
@@ -1579,15 +1623,20 @@
     const reusableCategory = priorCategory && !priorCategory.saveFailed &&
       priorCategory.categoryAlgorithm === 1 && priorCategory.categoryRange === categoryRange;
     const knownCategoryRevision = reusableCategory ? priorCategory.dataRevision || '' : '';
-    const priorFast = reusableAnnual ? priorAnnual : reusablePerformance ? priorPerformance : reusableOrders ? priorOrders : reusableCategory ? priorCategory : null;
+    const historyRange = JSON.stringify([opts.start || '',opts.end || '',opts.custNo || '',opts.itemNo || '',opts.invoice || '',opts.sales || '']);
+    const priorHistory = def.id === 'salesHistory' ? S.statResults[def.id] : null;
+    const reusableHistory = priorHistory && !priorHistory.saveFailed && priorHistory.historyAlgorithm===1 && priorHistory.historyRange===historyRange;
+    const knownHistoryRevision = reusableHistory ? priorHistory.dataRevision || '' : '';
+    const priorFast = reusableAnnual ? priorAnnual : reusablePerformance ? priorPerformance : reusableOrders ? priorOrders : reusableCategory ? priorCategory : reusableHistory ? priorHistory : null;
     S.ctxCache = null; // 每次重新生成都读取最新数据，避免把旧缓存保存成新报表。
     const ctx = getCtx(opts.start, opts.end) || await (async () => {
       const c = await normalizeCtx(def.id === 'annual' ? await api('get_annual_context', knownAnnualRevision) :
         def.id === 'salesPerformance' ? await api('get_performance_context', opts.start || '', opts.end || '', knownPerformanceRevision) :
         def.id === 'customerOrders' ? await api('get_orders_context', opts.start || '', opts.end || '', knownOrdersRevision) :
         def.id === 'categoryQuery' ? await api('get_category_context', opts.start || '', opts.end || '', knownCategoryRevision) :
+        def.id === 'salesHistory' ? await api('get_history_context', opts.start || '', opts.end || '', {custNo:opts.custNo,itemNo:opts.itemNo,invoice:opts.invoice,sales:opts.sales}, knownHistoryRevision) :
         await api('get_stats_context', opts.start || '', opts.end || ''));
-      if (!['annual', 'salesPerformance', 'customerOrders', 'categoryQuery'].includes(def.id)) putCtx(opts.start || '', opts.end || '', c);
+      if (!['annual', 'salesPerformance', 'customerOrders', 'categoryQuery', 'salesHistory'].includes(def.id)) putCtx(opts.start || '', opts.end || '', c);
       return c;
     })();
     const pf1 = performance.now();
@@ -1607,6 +1656,10 @@
       return;
     }
     if (!ctx || !ctx.sales || !ctx.sales.length) {
+      if (def.id === 'salesHistory' && [opts.custNo,opts.itemNo,opts.invoice,opts.sales].some(v=>String(v || '').trim())) {
+        toast(LANG === 'zh' ? '没有符合这些条件的销售记录。' : 'No sales records match these filters.');
+        return;
+      }
       // 区分「库里完全没有销售」和「所选时间段内没有销售」
       if (opts.start || opts.end) {
         let months = [];
@@ -1656,6 +1709,9 @@
       spec.dataRevision = revision;
       spec.annualWindow = annualWindow;
       spec.annualAlgorithm = 2;
+    }
+    if (def.id === 'salesHistory') {
+      spec.dataRevision=revision;spec.historyRange=historyRange;spec.historyAlgorithm=1;
     }
     if (def.id === 'categoryQuery') {
       spec.dataRevision = revision;
