@@ -10,3 +10,5 @@ services:
         sync: false
       - key: AUTO_SYNC
         value: "0"
+      - key: COST_VIEW_PASSWORD
+        sync: false

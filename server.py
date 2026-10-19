@@ -1311,6 +1311,46 @@ MIME = {
 }
 
 
+# Cost access is independent of business data and is never stored in backups.
+import secrets
+import hmac
+COST_SESSIONS = {}
+COST_ATTEMPTS = {}
+COST_AUTH_LOCK = threading.RLock()
+COST_TTL = 1800
+
+def cost_token_valid(token):
+    with COST_AUTH_LOCK:
+        now = time.time()
+        for key, expires in list(COST_SESSIONS.items()):
+            if expires <= now:
+                COST_SESSIONS.pop(key, None)
+        return bool(token and token in COST_SESSIONS)
+
+def redact_cost(value):
+    if isinstance(value, dict):
+        result = {k: redact_cost(v) for k, v in value.items()
+                  if 'cost' not in k.lower() and '成本' not in k}
+        # Saved report matrices can contain cost as a positional column.
+        rows = value.get('values')
+        if isinstance(rows, list) and rows and isinstance(rows[0], list):
+            columns = [i for i, h in enumerate(rows[0])
+                       if str(h).strip().lower() in ('cost', '成本')]
+            if columns:
+                result['values'] = [[v for i, v in enumerate(row) if i not in columns]
+                                    for row in rows]
+        return result
+    if isinstance(value, list):
+        return [redact_cost(v) for v in value]
+    if isinstance(value, str) and value[:1] in ('{', '[', '"'):
+        try:
+            parsed = json.loads(value)
+            if parsed != value:
+                return json.dumps(redact_cost(parsed), ensure_ascii=False)
+        except (ValueError, TypeError):
+            pass
+    return value
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "BCSLocal/1.0"
 
@@ -1322,6 +1362,8 @@ class Handler(BaseHTTPRequestHandler):
         if gzip_ok and len(body) > 102400 and "gzip" in accept:
             body = gzip.compress(body, compresslevel=6)
             self.send_response(status)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Cost-Unlocked", "1" if self._cost_allowed() else "0")
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Encoding", "gzip")
             self.send_header("Content-Length", str(len(body)))
@@ -1329,10 +1371,15 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         else:
             self.send_response(status)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Cost-Unlocked", "1" if self._cost_allowed() else "0")
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+    def _cost_allowed(self):
+        return cost_token_valid(self.headers.get('X-Cost-Token', ''))
 
     def _json(self, obj, status=200):
         self._send(json.dumps(obj, ensure_ascii=False).encode("utf-8"), status=status)
@@ -1366,6 +1413,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send(body, ctype)
 
     def _backup_download(self):
+        if not self._cost_allowed():
+            return self._json({"error": "COST_LOCKED"}, 403)
         try:
             body = export_backup_bytes()
         except Exception:
@@ -1388,7 +1437,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         method = path[len("/api/"):]
         fn = API_METHODS.get(method)
-        if not fn:
+        if not fn and method not in ("unlock_cost", "cost_status"):
             self._json({"error": "unknown method: " + method}, 404)
             return
         try:
@@ -1401,6 +1450,43 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             payload = {}
         args = payload.get("args", [])
+        if method == 'cost_status':
+            return self._json({'unlocked': self._cost_allowed()})
+        if method == 'unlock_cost':
+            password = os.environ.get('COST_VIEW_PASSWORD', '')
+            if not password:
+                return self._json({'error': 'COST_PASSWORD_NOT_CONFIGURED'}, 503)
+            ip = self.client_address[0]
+            with COST_AUTH_LOCK:
+                now = time.time()
+                attempts = [t for t in COST_ATTEMPTS.get(ip, []) if t > now - 60]
+                COST_ATTEMPTS[ip] = attempts
+                if len(attempts) >= 5:
+                    return self._json({'error': 'TOO_MANY_ATTEMPTS'}, 429)
+                supplied = str(args[0]) if args else ''
+                if not hmac.compare_digest(supplied.encode(), password.encode()):
+                    attempts.append(now)
+                    return self._json({'error': 'WRONG_PASSWORD'}, 403)
+                token = secrets.token_urlsafe(32)
+                COST_SESSIONS[token] = now + COST_TTL
+                COST_ATTEMPTS.pop(ip, None)
+            return self._json({'ok': True, 'token': token, 'expiresIn': COST_TTL})
+        allowed = self._cost_allowed()
+        if method in ('backup_restore',) and not allowed:
+            return self._json({'error': 'COST_LOCKED'}, 403)
+        if method == 'update_sale' and not allowed and len(args) > 1:
+            try:
+                changes = json.loads(args[1])
+                if 'cost' in changes:
+                    return self._json({'error': 'COST_LOCKED'}, 403)
+            except (ValueError, TypeError):
+                return self._json({'error': 'Invalid update'}, 400)
+        # History contains privilege-dependent columns. Recompute it from filtered
+        # data instead of sharing one saved result between locked/unlocked views.
+        if method == 'load_report' and args and args[0] == 'salesHistory':
+            return self._json({'ok': True, 'report': None})
+        if method == 'save_report' and args and args[0] == 'salesHistory':
+            return self._json({'ok': True})
         try:
             result = fn(*args)
         except TypeError as e:
@@ -1410,9 +1496,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "%s: %s" % (type(e).__name__, e)}, 500)
             return
         # 兼容前端:python 侧返回 JSON 字符串时自动解析 —— 我们直接返回对象即可
-        self._json(result if result is not None else {"ok": True})
+        if method == 'load_reports' and isinstance(result, dict):
+            result.get('reports', {}).pop('salesHistory', None)
+        self._json((result if allowed else redact_cost(result)) if result is not None else {"ok": True})
 
     def _backup_upload(self):
+        if not self._cost_allowed():
+            return self._json({"error": "COST_LOCKED"}, 403)
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b""
         if len(raw) < 100 or not raw.startswith(b"SQLite format 3\x00"):
