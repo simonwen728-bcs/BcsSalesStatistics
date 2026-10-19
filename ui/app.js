@@ -997,6 +997,10 @@
     // 传入 keepRows/keepCols（本次写入范围）且有上一次写入记录（S.sheetExtent）时，
     // 只清「新范围之外的尾巴」——重叠区会被本次 setValues 全量覆盖，无需清。
     const ext = S.sheetExtent ? S.sheetExtent[String(sh.getSheetName() || '')] : null;
+    try { sh.getMergeData().forEach(r=>r.breakApart()); } catch(e) {}
+    try { sh.cancelFreeze(); } catch(e) {}
+    try { sh.showColumns(0,sh.getMaxColumns()); } catch(e) {}
+    try { sh.showRows(0,Math.min(sh.getMaxRows(),Math.max(opts?.keepRows || 0,ext?.rows || 0))); } catch(e) {}
     if (opts && opts.keepRows != null && ext) {
       const nrows = sh.getMaxRows(), ncols = sh.getMaxColumns();
       const oldR = Math.min(ext.rows, nrows), oldC = Math.min(ext.cols, ncols);
@@ -1081,6 +1085,15 @@
     }
   }
 
+  // Every generated cell receives a complete baseline, including empty cells.
+  // Coordinates are not record identities: old per-row formatting must not be replayed.
+  function cleanGeneratedStyle(style) {
+    const edge={s:1,cl:{rgb:'#b8c4d2'}};
+    return Object.assign(style, Object.assign({bl:0,it:0,ul:null,st:null,
+      bg:{rgb:'#ffffff'},cl:{rgb:'#222222'},n:null,ht:0,vt:2,
+      bd:{t:edge,b:edge,l:edge,r:edge}},style));
+  }
+
   // 年度固定模板：样式随数据一次写入，避免逐格百分比修复和格式命令。
   function renderAnnualTemplate(spec, sh) {
     const started = performance.now();
@@ -1088,7 +1101,7 @@
     const nc = spec.values[0].length;
     const key = String(spec.sheet);
     const summaryRows = new Set([nr - 2, nr - 1, ...spec.yearGroups.map((g) => g.row - 1)]);
-    const user = S.userStyles[key] || {};
+    const user = {};
     const baseline = {};
     const matrix = spec.values.map((row, ri) => Array.from({ length: nc }, (_, ci) => {
       const percent = ri > 0 && ci >= 5 && ci % 2 === 1;
@@ -1096,6 +1109,7 @@
         ht: ci === 0 ? 1 : 3 }, ri === 0 ? { bg: { rgb: '#1f4e78' }, cl: { rgb: '#ffffff' } } : {}, user[ri + ':' + ci] || {});
       style.ht = ri === 0 ? 2 : ci === 0 ? (summaryRows.has(ri) ? 2 : 1) : percent ? 2 : 3; // 表头/比例居中，A列左，金额右
       if (ri > 0 && ci > 0) style.n = { pattern: percent ? '0.00%;-0.00%;' : '#,##0.00;-#,##0.00;' };
+      cleanGeneratedStyle(style);
       baseline[ri + ':' + ci] = style;
       const v = row[ci] === undefined || row[ci] === 0 ? '' : row[ci];
       return { v, s: style };
@@ -1128,7 +1142,7 @@
     const nr = spec.values.length, nc = spec.values[0].length;
     const key = String(spec.sheet);
     const isOrders = key === '客户订单统计';
-    const user = S.userStyles[key] || {};
+    const user = {};
     const styles = Array.from({ length: nr }, () => Array.from({ length: nc }, () => ({})));
     const eachRange = (range, fn) => {
       const m = /^([A-Z]+)(\d+):([A-Z]+)(\d+)$/.exec(range);
@@ -1158,6 +1172,7 @@
       const isHeader = r===0 || (isOrders && row[0] === 'Sales 2' && row[1] === 'Sales Order');
       st.ht=isHeader ? 2 : isOrders ? (c===0 ? 1 : [1,2,4,6,8].includes(c) ? 2 : 3) : [0,1,5].includes(c) ? 1 : percent ? 2 : 3;
       if(isHeader) st.cl={rgb:'#ffffff'};
+      cleanGeneratedStyle(st);
       baseline[r+':'+c]=st;
       return {v:row[c]===0 || row[c]===undefined ? '' : row[c],s:st};
     }));
@@ -1208,7 +1223,7 @@
       trackSave(api('set_pref','userStyles',JSON.stringify(S.userStyles)));
       trackSave(api('set_pref','sheetLayouts',JSON.stringify(S.sheetLayouts)));
     }
-    const user=S.userStyles[key] || {},lay=S.sheetLayouts[key] || {},baseline={},formats=[];
+    const user={},lay=S.sheetLayouts[key] || {},baseline={},formats=[];
     const col=v=>[...v].reduce((a,c)=>a*26+c.charCodeAt(0)-64,0)-1;
     (spec.numFmt || []).forEach(f=>{
       const m=/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/.exec(f.range);
@@ -1220,6 +1235,7 @@
       if(header || total) st.bg={rgb:'#d9eaf7'};
       const f=formats.find(f=>r>=f.r0 && r<=f.r1 && c>=f.c0 && c<=f.c1);if(f) st.n={pattern:f.pattern};
       Object.assign(st,user[r+':'+c] || {});
+      cleanGeneratedStyle(st);
       if(r<300) baseline[r+':'+c]=st;
       return {v:row[c]===0 || row[c]===undefined?'':row[c],s:st};
     }));
@@ -1242,6 +1258,7 @@
       const st={bl:r===0?1:0,vt:2,ht:r===0?2:[2,3,4,8,10,12].includes(c)?1:c>=14?3:2};
       if(r===0) st.bg={rgb:'#d9eaf7'};
       if(r>0 && c>=13) st.n={pattern:zhFmt(c===13?'#,##0':'#,##0.00')};
+      cleanGeneratedStyle(st);
       if(r<300) baseline[r+':'+c]=st;
       return {v:row[c]===undefined || row[c]===null?'':row[c],s:st};
     }));
@@ -1280,6 +1297,7 @@
       const st={bl:r===0 || header || total?1:0,vt:2,ht:r<off?1:header?2:left.includes(c)?1:right.includes(c)?3:2};
       if(total) st.bg={rgb:'#d9bd8b'};else if(header && !cab)st.bg={rgb:'#d9e6f3'};
       const f=formats.find(f=>r>=f.r0 && r<=f.r1 && c>=f.c0 && c<=f.c1);if(f)st.n={pattern:f.pattern};
+      cleanGeneratedStyle(st);
       if(r<300)baseline[r+':'+c]=st;
       return {v:row[c]===undefined || row[c]===null?'':row[c],s:st};
     }));
@@ -1301,6 +1319,7 @@
       const st={bl:header || total ? 1:0,vt:2,ht:header ? 2 : c===1 ? 1 : money.includes(c) ? 3 : 2};
       if(header || total) st.bg={rgb:header ? '#d9e6f3':'#d9bd8b'};
       if(!header && c>=4) st.n={pattern:zhFmt(money.includes(c) ? '#,##0.00' : pct.includes(c) ? '0.00%' : '#,##0')};
+      cleanGeneratedStyle(st);
       if(r<300) baseline[r+':'+c]=st;
       return {v:row[c]===0 || row[c]===undefined ? '' : row[c],s:st};
     }));
@@ -1341,6 +1360,7 @@
       if(header || total) st.bg={rgb:header ? '#d9eaf7':'#d9e6f3'};
       const f=formats.find(f=>r>=f.r0 && r<=f.r1 && c>=f.c0 && c<=f.c1);
       if(f) st.n={pattern:f.pattern};
+      cleanGeneratedStyle(st);
       if(r<300) baseline[r+':'+c]=st;
       return {v:row[c]===0 || row[c]===undefined ? '' : (r===1 ? String(row[c]).replace(/\n/g,' | ') : row[c]),s:st};
     }));
@@ -1359,7 +1379,7 @@
 
   function renderCategoryTemplate(spec, sh) {
     const nr=spec.values.length, nc=spec.values[0].length, key=String(spec.sheet);
-    const user=S.userStyles[key] || {}, baseline={};
+    const user={}, baseline={};
     const qty=(spec.numFmt[0] || {}).fmt === '#,##0';
     const pattern=zhFmt(qty ? '#,##0' : '#,##0.00');
     const matrix=spec.values.map((row,r)=>Array.from({length:nc},(_,c)=>{
@@ -1369,6 +1389,7 @@
       st.ht=header ? 2 : c<3 ? 1 : qty ? 2 : 3;
       st.vt=2;
       if(!header && c>=3) st.n={pattern};
+      cleanGeneratedStyle(st);
       if(r<300 && c<60) baseline[r+':'+c]=st;
       return {v:row[c]===0 || row[c]===undefined ? '' : row[c],s:st};
     }));
@@ -1519,19 +1540,12 @@
       const r2 = Number(m[4]);
       for (let c = c1; c <= c2; c++) fmtRangeCols[c] = { startRow0: r1 - 1, pat };
     });
-    const matrix = values.map((r, ri) => {
-      const row = r.slice();
-      while (row.length < nc) row.push('');
-      for (let ci = 0; ci < row.length; ci++) {
-        let v = row[ci];
-        if (v === 0) { row[ci] = ''; continue; }
-        const fr = fmtRangeCols[ci];
-        if (fr && ri >= fr.startRow0 && typeof v === 'number') {
-          row[ci] = { v, s: { n: { pattern: fr.pat } } };
-        }
-      }
-      return row;
-    });
+    const matrix = values.map((r,ri)=>Array.from({length:nc},(_,ci)=>{
+      const v=r[ci],fr=fmtRangeCols[ci];
+      const st=cleanGeneratedStyle({});
+      if(fr && ri>=fr.startRow0+off && typeof v==='number')st.n={pattern:fr.pat};
+      return {v:v===0 || v==null?'':v,s:st};
+    }));
     const __pf = (window.__renderProfile = window.__renderProfile || { last: {} });
     const __t = (k) => { __pf.last[k] = Math.round(performance.now() - __pf._t0); __pf._t0 = performance.now(); };
     __pf._t0 = performance.now(); __pf.last = {};
@@ -1613,7 +1627,7 @@
     // 布局基线 = 本次实际应用的列宽/行高/冻结
     S.appliedLayouts[layKey] = { w: finalWidths, h: appliedH, fz: appliedFz };
     // 回放用户修饰（只写样式，不动数值），随后记录样式基线（供定时差分捕获后续修饰）
-    const userSt = S.userStyles[layKey] || {};
+    const userSt = {}; // Do not restore formatting by stale row coordinates.
     Object.entries(userSt).forEach(([k, styleObj]) => {
       const parts = k.split(':');
       const ri = Number(parts[0]), ci = Number(parts[1]);
@@ -2652,6 +2666,7 @@
       const edge={s:1,cl:{rgb:'#b8c4d2'}};
       st.bd={t:edge,b:edge,l:edge,r:edge};
       const f=fr[ci];if(f && ri>=f.startRow0 && typeof v==='number')st.n={pattern:zhFmt(f.pat)};
+      cleanGeneratedStyle(st);
       return {v:v===0?'':v,s:st};
     }));
     try { sh.getRange(0, 0, matrix.length, nc).setValues(matrix); } catch (e) { /* ignore */ }
