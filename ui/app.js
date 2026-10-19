@@ -2503,7 +2503,7 @@
   // 右下=最近12个完整月份销售趋势折线图（横）。对应原 Apps Script「客户动态分析」表布局。
   const PERIOD_KEYS = [['ALL', 'periodAll'], ['LAST_MONTH', 'periodLastMonth'], ['THIS_YEAR', 'periodThisYear'], ['YTD', 'periodYtd']];
   let dashboardRenderToken=0;
-  const DASH_SNAPSHOT_KEY='bcs-dashboard-v2';
+  const DASH_SNAPSHOT_KEY='bcs-dashboard-v3';
   function dashStatus(message) {
     let el=document.getElementById('dash-status');
     if(!el){el=document.createElement('span');el.id='dash-status';el.style.cssText='font-size:12px;color:#65758b;margin-left:8px';$('#dash-periods').appendChild(el);}
@@ -2552,7 +2552,7 @@
         try{saved=JSON.parse(localStorage.getItem(DASH_SNAPSHOT_KEY) || 'null');}catch(e){}
         if(!saved){try{const r=await api('load_report','customerDashboard');saved=r && r.report && r.report.spec;}catch(e){}}
         if(renderToken!==dashboardRenderToken)return;
-        if(saved && saved.dashboardAlgorithm===2 && saved.dashboard && saved.dashboard.customers && saved.dashboard.rankings){
+        if(saved && saved.dashboardAlgorithm===3 && saved.dashboard && saved.dashboard.customers && saved.dashboard.rankings){
           S.dash.cache=saved.dashboard;S.dash.cacheWindow=saved.dashboardWindow;
           S.dash.cacheRevision=saved.dataRevision;S.dash.cacheToken=S.dataToken;
         }
@@ -2569,7 +2569,7 @@
       if(!ctx.unchanged){
         S.dash.cache=STATS.customerDashboardData(ctx.sales,{period:S.dash.period,customers:ctx.customers || []},ctx.reps);
         S.dash.cacheRevision=ctx.revision;S.dash.cacheToken=S.dataToken;S.dash.cacheWindow=windowKey;
-        const snapshot={values:[],dashboardAlgorithm:2,dashboard:S.dash.cache,dataRevision:ctx.revision,dashboardWindow:windowKey};
+        const snapshot={values:[],dashboardAlgorithm:3,dashboard:S.dash.cache,dataRevision:ctx.revision,dashboardWindow:windowKey};
         try{localStorage.setItem(DASH_SNAPSHOT_KEY,JSON.stringify(snapshot));}catch(e){}
         trackSave(api('save_report','customerDashboard',snapshot,{},ctx.revision).catch(()=>{}));
         await drawDashboard();

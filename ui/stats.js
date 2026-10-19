@@ -1128,6 +1128,13 @@ window.STATS = (function () {
           months: monthKeys.reduce((m, k) => ((m[k] = { total: 0, cabinet: 0, stone: 0 }), m), {}) };
       }
       const x = customers[no];
+      // Dates determine recency; invoice and record ID only break same-day ties.
+      const invoice=String(r.invoice || ''), recordId=String(r.id || '');
+      const previous=x.latestOrder;
+      const invoiceOrder=previous ? invoice.localeCompare(previous.invoice,undefined,{numeric:true}) : 0;
+      if(!previous || dt>previous.date || (dt===previous.date && (invoiceOrder>0 || (invoiceOrder===0 && recordId.localeCompare(previous.id,undefined,{numeric:true})>0)))) {
+        x.latestOrder={date:dt,invoice,id:recordId,sales2};
+      }
       if(!x.lastSale || dt>x.lastSale)x.lastSale=dt;
       if (!x.name && name) x.name = name;
       if (sales1) x.sales1Amounts[sales1] = (x.sales1Amounts[sales1] || 0) + amt;
@@ -1180,7 +1187,7 @@ window.STATS = (function () {
         .sort((a, b) => (b.totalAmount !== a.totalAmount ? b.totalAmount - a.totalAmount : String(a.name).localeCompare(String(b.name), undefined, { sensitivity: 'base' })))
         .map((x) => {
           const s1 = main1(x.sales1Amounts);
-          return [x.no, x.name, x.totalAmount, s1, s1 === 'HO' ? main1(x.sales2Amounts) : ''];
+          return [x.no, x.name, x.totalAmount, s1, s1 === 'HO' ? (customers[x.no].latestOrder?.sales2 || '') : ''];
         });
     });
     return { period, monthKeys, customers, rankings, periodLabels: { ALL: '全部', LAST_MONTH: '上月', THIS_YEAR: '今年', YTD: 'TTM' } };
