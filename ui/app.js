@@ -406,6 +406,42 @@
     USING_MOCK = true;
   }
 
+  let costToken='', costDeadline=0;
+  function costVisible(){return !!costToken && Date.now()<costDeadline;}
+  async function checkCostAccess(){
+    if(!costVisible())return false;
+    const status=await api('cost_status');
+    if(!status.unlocked){costToken='';location.reload();return false;}
+    return true;
+  }
+  async function unlockCost(){
+    if(await checkCostAccess()){toast(LANG==='zh'?'成本已解锁':'Cost is unlocked');return;}
+    const data=await formModal(LANG==='zh'?'解锁成本':'Unlock cost',[
+      {key:'password',label:LANG==='zh'?'成本密码':'Cost password',type:'password',value:''}
+    ]);
+    if(!data)return;
+    const result=await api('unlock_cost',data.password);
+    if(!result.ok){toast(result.error==='COST_PASSWORD_NOT_CONFIGURED'?
+      '请在 Render 设置 COST_VIEW_PASSWORD':result.error==='TOO_MANY_ATTEMPTS'?'尝试过多，请一分钟后再试':'密码不正确');return;}
+    costToken=result.token;costDeadline=Date.now()+result.expiresIn*1000;
+    // Drop privilege-dependent in-memory results and rebuild the current view.
+    S.ctxCache=null;S.dataToken++;S.sheetToken={};
+    delete S.statResults.salesHistory;delete S.reportsLoaded.salesHistory;
+    S.costRefreshHistory=true;
+    await clearAllStatSheets();
+    navigate(S.nav);
+    toast(LANG==='zh'?'成本已解锁，当前页面已更新':'Cost unlocked; view refreshed');
+  }
+  function hideCostColumn(spec){
+    if(costVisible() || !spec?.values?.length)return spec;
+    const col=spec.values[0].findIndex(h=>/^(cost|成本)$/i.test(String(h).trim()));
+    if(col>=0)spec.values=spec.values.map(row=>row.filter((_,i)=>i!==col));
+    return spec;
+  }
+  // A fresh page always starts locked. Tokens exist only in this page's memory.
+  setInterval(()=>{if(costToken && !costVisible())location.reload();},1000);
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden && costToken)checkCostAccess();});
+
   // 统一调用：python 侧返回 JSON 字符串时自动解析
   // 远程版：pywebview 不可用时走 HTTP POST /api/<method>
   async function api(method) {
@@ -421,9 +457,12 @@
     // 否则走 HTTP（远程网页版）
     const resp = await fetch('/api/' + method, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Cost-Token': costVisible()?costToken:'' },
       body: JSON.stringify({ args: args }),
     });
+    if(costToken && method!=='unlock_cost' && resp.headers.get('X-Cost-Unlocked')==='0'){
+      costToken='';location.reload();throw new Error('成本权限已过期，请重新解锁');
+    }
     const text = await resp.text();
     try { return JSON.parse(text); } catch (e) { return text; }
   }
@@ -1252,7 +1291,7 @@
   }
 
   function renderSalesQueryTemplate(spec,sh) {
-    const key=String(spec.sheet),nr=spec.values.length,nc=16,baseline={};
+    const key=String(spec.sheet),nr=spec.values.length,nc=spec.values[0].length,baseline={};
     const widths=[100,100,300,120,120,120,120,100,300,100,200,100,200,100,150,150];
     const matrix=spec.values.map((row,r)=>Array.from({length:nc},(_,c)=>{
       const st={bl:r===0?1:0,vt:2,ht:r===0?2:[2,3,4,8,10,12].includes(c)?1:c>=14?3:2};
@@ -1410,6 +1449,7 @@
   }
 
   async function renderSpecInnerBody(spec) {
+    hideCostColumn(spec);
     placeMount();
     // 每个功能拥有自己的工作表：按 spec.sheet 找表（无则新建），原地清空重写，不影响其他功能的表
     const wb = S.u.api.getActiveWorkbook();
@@ -1864,6 +1904,7 @@
       return;
     }
     const spec = STATS[def.id](ctx.sales, Object.assign({}, opts, { reps: ctx.reps, stock: ctx.stock, customers: ctx.customers }), t);
+    hideCostColumn(spec);
     const pf2 = performance.now();
     if (!spec || spec.error) {
       const key = 'err' + String((spec && spec.error) || '');
@@ -1971,7 +2012,8 @@
   }
 
   async function exportStatResult(def) {
-    const spec = S.statResults[def.id];
+    if(costToken && !await checkCostAccess())return;
+    const spec = hideCostColumn(S.statResults[def.id]);
     if (!spec || !spec.values || !spec.values.length) { toast(t('exportEmpty')); return; }
     // 先走后端接口（本地 exe 版桥接实现）；远程版后端无此接口，失败后走浏览器本地导出
     try {
@@ -2135,6 +2177,10 @@
       const hit = [...actions.querySelectorAll('button')].find((b) => b.textContent === trig);
       if (hit) hit.classList.add('triggered');
     }
+    if(def.id==='salesHistory' && S.costRefreshHistory){
+      S.costRefreshHistory=false;
+      await runStat(def,Object.assign({},collectStatOpts(def)),null);return;
+    }
     const cached = S.statResults[def.id];
     $('#stat-state').textContent = reportState(cached);
     renderStatExtra(def);
@@ -2186,11 +2232,9 @@
     const fileDrop = document.createElement('div');
     fileDrop.className = 'dropdown';
     const fileItems = [
+      { label: LANG==='zh'?'解锁成本…':'Unlock cost…', fn: unlockCost },
       { label: t('miInitialize'), fn: initializeFlow },
       { sep: true },
-      { label: t('miImportSales'), fn: importSalesFlow },
-      { label: t('miImportMaster'), fn: importMasterFlow },
-      { label: t('miLoadDemo'), fn: loadDemo },
       { sep: true },
       { label: t('miExportBackup'), fn: exportBackup },
       { label: t('miRestoreBackup'), fn: restoreBackup },
@@ -2821,6 +2865,7 @@
     ['rep2Name', 'colRep2Name'], ['qty', 'colQty'], ['amount', 'colAmount'], ['cost', 'colCost'],
   ];
 
+  function salesColumns(){return SALES_COLS.filter(([key])=>key!=='cost' || costVisible());}
   function colLetter(n) { let t = ''; while (n > 0) { const m2 = (n - 1) % 26; t = String.fromCharCode(64 + m2 + 1) + t; n = Math.floor((n - 1) / 26); } return t; }
   function rngA(r1, c1, r2, c2) { return colLetter(c1) + r1 + ':' + colLetter(c2) + r2; }
   function sheetSelEntry() {
@@ -2983,10 +3028,10 @@
         : (start + 1) + '-' + Math.min(start + S.pageSize, res.total) + ' / ' + res.total)
       : '';
     $('#sales-page').textContent = (S.salesPage + 1) + ' / ' + pages;
-    const values = [SALES_COLS.map(([, lk]) => t(lk))];
-    res.rows.forEach((r) => values.push(SALES_COLS.map(([k]) => (r[k] === null || r[k] === undefined ? '' : r[k]))));
+    const values = [salesColumns().map(([, lk]) => t(lk))];
+    res.rows.forEach((r) => values.push(salesColumns().map(([k]) => (r[k] === null || r[k] === undefined ? '' : r[k]))));
     const n = values.length;
-    S.sheetCtx = { kind: 'sales', rows: res.rows, startRow: 1, colCount: SALES_COLS.length };
+    S.sheetCtx = { kind: 'sales', rows: res.rows, startRow: 1, colCount: salesColumns().length };
     S.sheetCtxCache[t('tabSales')] = S.sheetCtx;
     await renderSpec({
       sheet: t('tabSales'), values, salesQueryTemplate:true,
@@ -3016,11 +3061,11 @@
       { key: 'amount', label: t('colAmount'), type: 'number', value: r.amount },
       { key: 'cost', label: t('colCost'), type: 'number', value: r.cost },
     ];
-    formModal(t('edit') + ' — ' + r.month, fields).then(async (values) => {
+    formModal(t('edit') + ' — ' + r.month, fields.filter(f=>f.key!=='cost' || costVisible())).then(async (values) => {
       if (!values) return;
       values.qty = Number(values.qty) || 0;
       values.amount = Number(values.amount) || 0;
-      values.cost = Number(values.cost) || 0;
+      if(costVisible())values.cost = Number(values.cost) || 0;else delete values.cost;
       await api('update_sale', r.id, JSON.stringify(values));
       invalidateCtx();
       renderSales();
@@ -3531,13 +3576,11 @@
   }
 
   // 备份：下载整库 / 上传整库（后端 /api/backup_download、/api/backup_upload 已实现）
-  function webImportDownloadBackup() {
-    const a = document.createElement('a');
-    a.href = '/api/backup_download';
-    a.download = '';
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(() => a.remove(), 1000);
+  async function webImportDownloadBackup() {
+    const resp=await fetch('/api/backup_download',{headers:{'X-Cost-Token':costVisible()?costToken:''}});
+    if(!resp.ok)throw new Error('请先通过 文件 → 解锁成本');
+    const url=URL.createObjectURL(await resp.blob()),a=document.createElement('a');
+    a.href=url;a.download='bcs_backup.db';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
   }
 
   function webImportPickBackupFile() {
@@ -3555,7 +3598,7 @@
     const buf = await file.arrayBuffer();
     const resp = await fetch('/api/backup_upload', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/octet-stream' },
+      headers: { 'Content-Type': 'application/octet-stream', 'X-Cost-Token':costVisible()?costToken:'' },
       body: buf,
     });
     return resp.json();
@@ -3621,7 +3664,9 @@
           }
           if (total) await invalidateStatOutputs();
           S.histSel.clear();
-          navigate('history');
+          if(S.nav==='history')await renderHistory();
+          else if(S.nav==='sales')await renderSales(true);
+          else navigate(S.nav);
           const synced = results.reduce((acc, r) => ({ s1: acc.s1 + ((r && r.repsSynced) ? r.repsSynced.s1 : 0), s2: acc.s2 + ((r && r.repsSynced) ? r.repsSynced.s2 : 0) }), { s1: 0, s2: 0 });
           toast(tf('importDone', { n: total, m: importedMonths.length > 1 ? importedMonths[0] + '~' + importedMonths[importedMonths.length - 1] : (importedMonths[0] || '-') }) +
             (synced.s1 + synced.s2 > 0 ? ' ' + tf('repsSynced', { s1: synced.s1, s2: synced.s2 }) : ''));
@@ -3693,6 +3738,7 @@
 
   // ================= backup / restore =================
   async function exportBackup() {
+    if(!await checkCostAccess()){toast('请先通过 文件 → 解锁成本');return;}
     const body = document.createElement('div');
     body.className = 'form';
     body.innerHTML =
@@ -3724,11 +3770,11 @@
             }
             // 远程版后端无 export_backup：直接下载整库文件（/api/backup_download）。
             // 注意：远程版备份统一为整库下载，月份筛选选项暂不生效。
-            webImportDownloadBackup();
+            await webImportDownloadBackup();
             toast(tf('backupDone', { p: 'bcs_backup.db' }));
           } catch (e) {
             // 网络异常等：同样走下载兜底（下载不经过 api()）
-            webImportDownloadBackup();
+            await webImportDownloadBackup();
             toast(tf('backupDone', { p: 'bcs_backup.db' }));
           }
         },
@@ -3743,6 +3789,7 @@
   }
 
   async function restoreBackup() {
+    if(!await checkCostAccess()){toast('请先通过 文件 → 解锁成本');return;}
     let info;
     try { info = await api('backup_inspect'); } catch (e) { toast('Restore error: ' + e); return; }
     if (!info || !info.ok) {
@@ -3962,7 +4009,6 @@
       });
     } catch (e) { /* ignore */ }
     $('#sales-import').onclick = importSalesFlow;
-    $('#sales-delmonth').onclick = () => navigate('history');
     let custTm = null;
     $('#cust-search').addEventListener('input', (e) => { S.custQuery = e.target.value; clearTimeout(custTm); custTm = setTimeout(renderCustomers, 300); });
     $('#cust-add').onclick = () => editCustomer();

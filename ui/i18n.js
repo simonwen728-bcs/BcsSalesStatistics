@@ -15,7 +15,7 @@ window.I18N = {
     tabCustomers: 'Customers',
     tabInventory: 'Inventory',
     tabReps: 'Reps (Group)',
-    tabHistory: 'Import History',
+    tabHistory: 'Import Management',
     tabDashboard: 'Customer Trends',
     tabStats: 'Statistics',
     // Common
@@ -285,7 +285,7 @@ window.I18N = {
     tabCustomers: '客户',
     tabInventory: '库存',
     tabReps: '销售分组',
-    tabHistory: '导入记录',
+    tabHistory: '导入管理',
     tabDashboard: '客户动态',
     tabStats: '统计报表',
     search: '搜索...',
