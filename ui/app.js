@@ -1144,6 +1144,15 @@
     const matrix = spec.values.map((row,r) => Array.from({length:nc},(_,c) => {
       const fixed=styles[r][c];
       const st=Object.assign({bl:0},fixed,user[r+':'+c] || {});
+      if(!isOrders) {
+        // Row positions change with report filters. Never replay old summary
+        // fills/bold/text colors onto a different salesperson at the same row.
+        st.bg=fixed.bg || {rgb:'#ffffff'};
+        st.bl=fixed.bl || 0;
+        st.cl=fixed.cl || {rgb:'#222222'};
+        const edge={s:1,cl:{rgb:'#b8c4d2'}};
+        st.bd={t:edge,b:edge,l:edge,r:edge};
+      }
       if (fixed.n) st.n=fixed.n;
       const percent=!!(fixed.n && fixed.n.pattern.includes('%'));
       const isHeader = r===0 || (isOrders && row[0] === 'Sales 2' && row[1] === 'Sales Order');
