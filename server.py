@@ -591,11 +591,12 @@ class Api:
                                    "FROM sales" + condition + " ORDER BY sold_date,invoice,id", params).fetchall()
                 reps = {"s1": [row_to_rep(r) for r in con.execute(
                     "SELECT * FROM reps WHERE kind='s1' AND (deleted IS NULL OR deleted=0) ORDER BY code")], "s2": []}
+                customers = [row_to_customer(r) for r in con.execute("SELECT * FROM customers ORDER BY no")]
             finally:
                 con.close()
             fields = ["soldDate", "invoice", "custNo", "custName", "rep1", "rep2", "type", "amount", "qty"]
             result = {"cols": fields, "rows": [[r[i] or (0 if i>=7 else "") for i in range(9)]
-                                                 for r in rows], "reps": reps, "revision": revision}
+                                                 for r in rows], "reps": reps, "customers": customers, "revision": revision}
             self._customer_stats_cache = (key, result)
             return result
 
@@ -1472,15 +1473,14 @@ class Handler(BaseHTTPRequestHandler):
                 COST_ATTEMPTS.pop(ip, None)
             return self._json({'ok': True, 'token': token, 'expiresIn': COST_TTL})
         allowed = self._cost_allowed()
-        if method in ('backup_restore',) and not allowed:
-            return self._json({'error': 'COST_LOCKED'}, 403)
-        if method == 'update_sale' and not allowed and len(args) > 1:
-            try:
-                changes = json.loads(args[1])
-                if 'cost' in changes:
-                    return self._json({'error': 'COST_LOCKED'}, 403)
-            except (ValueError, TypeError):
-                return self._json({'error': 'Invalid update'}, 400)
+        management_methods = {
+            'update_sale', 'apply_sales_import', 'delete_batch', 'list_batches',
+            'upsert_customer', 'delete_customer', 'upsert_stock', 'delete_stock',
+            'upsert_rep', 'delete_rep', 'apply_master_import', 'clear_all_data',
+            'initialize_data', 'sync_master_from_sheets', 'backup_restore', 'backup_inspect'
+        }
+        if method in management_methods and not allowed:
+            return self._json({'error': 'MANAGEMENT_LOCKED'}, 403)
         # History contains privilege-dependent columns. Recompute it from filtered
         # data instead of sharing one saved result between locked/unlocked views.
         if method == 'load_report' and args and args[0] == 'salesHistory':
