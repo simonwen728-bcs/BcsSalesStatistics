@@ -864,9 +864,18 @@
     return { univer, api: FUniver.newAPI(univer) };
   }
 
+  function salesReadOnlyCommand(id){
+    return /^(?:sheet\.command\.(?:set-range-values|clear-selection-(?:all|content)|insert-|remove-|delete-range|move-range|paste|cut|fill|auto-fill)|univer\.command\.(?:paste|cut|undo|redo))/.test(id || '');
+  }
   function initUniver() {
     if (S.u) return;
     S.u = makeUniverApp('univerMount');
+    S.u.api.onBeforeCommandExecute(command=>{
+      if(S.nav==='sales' && !costVisible() && !S.isRendering && salesReadOnlyCommand(command.id)){
+        toast(LANG==='zh'?'销售明细为只读，请先解锁管理权限':'Sales records are read-only. Unlock management to edit.');
+        throw new Error('SALES_READ_ONLY');
+      }
+    });
     // 单元格点击 → 行选中（数据管理页的行操作依赖它）
     try {
       const api = S.u.api;
@@ -2453,7 +2462,7 @@
       return;
     }
     initUniver();
-    try{S.u.api.getActiveWorkbook().setEditable(true);}catch(e){}
+
     // 工作簿常驻，进页面时确保已初始化
     if (isReport) {
       const ws = document.getElementById('wb-stat');
@@ -2474,7 +2483,7 @@
     buildSidebar();
   }
   function renderTab(id) {
-    try{S.u.api.getActiveWorkbook().setEditable(true);}catch(e){}
+
     loadBar(true);
     let p = null;
     if (id === 'sales') p = renderSales();
@@ -2484,7 +2493,7 @@
     else if (id === 'history') p = renderHistory();
     else if (id === 'dashboard') p = renderDashboard();
     Promise.resolve(p).finally(() => {
-      try{S.u.api.getActiveWorkbook().setEditable(!(['sales','customers'].includes(S.nav) && !costVisible()));}catch(e){}
+
       loadBar(false);
     });
   }
@@ -3030,8 +3039,7 @@
 
   let salesToken = 0;
   async function renderSales(force=false) {
-    try{S.u.api.getActiveWorkbook().setEditable(true);}catch(e){}
-    try {
+
     const token = ++salesToken;
     const all = !S.pageSize;   // pageSize=0 = 加载全部
     const tk = 'sales:' + S.dataToken + ':' + JSON.stringify(S.salesFilters) + ':' + S.salesPage + ':' + (all ? 'all' : S.pageSize);
@@ -3068,9 +3076,6 @@
     });
     S.sheetToken[t('tabSales')] = tk;
     S.lastHLRow = null;
-    } finally {
-      try{S.u.api.getActiveWorkbook().setEditable(S.nav!=='sales' || costVisible());}catch(e){}
-    }
   }
 
   function editSalesRow(r) {
