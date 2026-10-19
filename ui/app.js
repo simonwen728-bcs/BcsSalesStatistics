@@ -415,9 +415,9 @@
     return true;
   }
   async function unlockCost(){
-    if(await checkCostAccess()){toast(LANG==='zh'?'成本已解锁':'Cost is unlocked');return;}
-    const data=await formModal(LANG==='zh'?'解锁成本':'Unlock cost',[
-      {key:'password',label:LANG==='zh'?'成本密码':'Cost password',type:'password',value:''}
+    if(await checkCostAccess()){toast(LANG==='zh'?'管理权限已解锁':'Cost is unlocked');return;}
+    const data=await formModal(LANG==='zh'?'解锁管理权限':'Unlock management',[
+      {key:'password',label:LANG==='zh'?'管理密码':'Management password',type:'password',value:''}
     ]);
     if(!data)return;
     const result=await api('unlock_cost',data.password);
@@ -429,8 +429,9 @@
     delete S.statResults.salesHistory;delete S.reportsLoaded.salesHistory;
     S.costRefreshHistory=true;
     await clearAllStatSheets();
+    buildMenus();
     navigate(S.nav);
-    toast(LANG==='zh'?'成本已解锁，当前页面已更新':'Cost unlocked; view refreshed');
+    toast(LANG==='zh'?'管理权限已解锁，当前页面已更新':'Cost unlocked; view refreshed');
   }
   function hideCostColumn(spec){
     if(costVisible() || !spec?.values?.length)return spec;
@@ -2232,12 +2233,12 @@
     const fileDrop = document.createElement('div');
     fileDrop.className = 'dropdown';
     const fileItems = [
-      { label: LANG==='zh'?'解锁成本…':'Unlock cost…', fn: unlockCost },
-      { label: t('miInitialize'), fn: initializeFlow },
+      { label: LANG==='zh'?'解锁管理权限…':'Unlock management…', fn: unlockCost },
+      { label: t('miInitialize'), fn: initializeFlow, admin:true },
       { sep: true },
       { sep: true },
-      { label: t('miExportBackup'), fn: exportBackup },
-      { label: t('miRestoreBackup'), fn: restoreBackup },
+      { label: t('miExportBackup'), fn: exportBackup, admin:true },
+      { label: t('miRestoreBackup'), fn: restoreBackup, admin:true },
     ];
     // 统计功能已平铺在「统计报表」页顶部按钮栏，顶部不再设「统计」下拉菜单
     fileItems.forEach((f) => {
@@ -2250,7 +2251,9 @@
       const it = document.createElement('div');
       it.className = 'dd-item';
       it.textContent = f.label;
-      it.onclick = (e) => { e.stopPropagation(); closeDropdowns(); f.fn(); };
+      const locked=f.admin && !costVisible();
+      if(locked){it.style.opacity='.4';it.style.cursor='not-allowed';it.setAttribute('aria-disabled','true');}
+      it.onclick = (e) => { e.stopPropagation(); if(locked)return; closeDropdowns(); f.fn(); };
       fileDrop.appendChild(it);
     });
     file.appendChild(fileDrop);
@@ -2399,12 +2402,16 @@
           a.textContent = (n.icon ? n.icon + ' ' : '') + t(n.labelKey);
           a.title = '';
         }
-        a.onclick = () => navigate(n.id);
+        const locked=['customers','inventory','reps','history'].includes(n.id) && !costVisible();
+        if(locked){a.style.opacity='.4';a.style.cursor='not-allowed';a.setAttribute('aria-disabled','true');}
+        a.onclick = () => {if(!locked)navigate(n.id);};
         sb.appendChild(a);
       }
     });
   }
   function navigate(id) {
+    if(['customers','inventory','reps','history'].includes(id) && !costVisible()){toast('请先解锁管理权限 / Unlock management first');return;}
+    ['sales-import','cust-add','cust-import','cust-sync'].forEach(id=>{const b=document.getElementById(id);if(b)b.disabled=!costVisible();});
     // 离开当前页面时立即落库（不等定时器）：分组直接编辑 + 上一张渲染表的布局/样式调整。
     // 覆盖切到 history/dashboard 等不触发渲染的页面；关闭软件无可靠钩子，仍由 2.5s 定时器兜底最后几秒。
     if (id !== S.nav) {
@@ -2445,7 +2452,9 @@
       buildSidebar();
       return;
     }
-    initUniver();          // 工作簿常驻，进页面时确保已初始化
+    initUniver();
+    try{S.u.api.getActiveWorkbook().setEditable(true);}catch(e){}
+    // 工作簿常驻，进页面时确保已初始化
     if (isReport) {
       const ws = document.getElementById('wb-stat');
       if (ws) ws.style.display = 'block';
@@ -2465,6 +2474,7 @@
     buildSidebar();
   }
   function renderTab(id) {
+    try{S.u.api.getActiveWorkbook().setEditable(true);}catch(e){}
     loadBar(true);
     let p = null;
     if (id === 'sales') p = renderSales();
@@ -2473,7 +2483,10 @@
     else if (id === 'reps') p = renderReps();
     else if (id === 'history') p = renderHistory();
     else if (id === 'dashboard') p = renderDashboard();
-    Promise.resolve(p).finally(() => loadBar(false));
+    Promise.resolve(p).finally(() => {
+      try{S.u.api.getActiveWorkbook().setEditable(!(['sales','customers'].includes(S.nav) && !costVisible()));}catch(e){}
+      loadBar(false);
+    });
   }
 
   function collectStatOpts(def) {
@@ -2490,7 +2503,7 @@
   // 右下=最近12个完整月份销售趋势折线图（横）。对应原 Apps Script「客户动态分析」表布局。
   const PERIOD_KEYS = [['ALL', 'periodAll'], ['LAST_MONTH', 'periodLastMonth'], ['THIS_YEAR', 'periodThisYear'], ['YTD', 'periodYtd']];
   let dashboardRenderToken=0;
-  const DASH_SNAPSHOT_KEY='bcs-dashboard-v1';
+  const DASH_SNAPSHOT_KEY='bcs-dashboard-v2';
   function dashStatus(message) {
     let el=document.getElementById('dash-status');
     if(!el){el=document.createElement('span');el.id='dash-status';el.style.cssText='font-size:12px;color:#65758b;margin-left:8px';$('#dash-periods').appendChild(el);}
@@ -2539,7 +2552,7 @@
         try{saved=JSON.parse(localStorage.getItem(DASH_SNAPSHOT_KEY) || 'null');}catch(e){}
         if(!saved){try{const r=await api('load_report','customerDashboard');saved=r && r.report && r.report.spec;}catch(e){}}
         if(renderToken!==dashboardRenderToken)return;
-        if(saved && saved.dashboardAlgorithm===1 && saved.dashboard && saved.dashboard.customers && saved.dashboard.rankings){
+        if(saved && saved.dashboardAlgorithm===2 && saved.dashboard && saved.dashboard.customers && saved.dashboard.rankings){
           S.dash.cache=saved.dashboard;S.dash.cacheWindow=saved.dashboardWindow;
           S.dash.cacheRevision=saved.dataRevision;S.dash.cacheToken=S.dataToken;
         }
@@ -2554,9 +2567,9 @@
       const ctx=await normalizeCtx(await api('get_customer_stats_context','','',valid ? S.dash.cacheRevision || '' : ''));
       if(renderToken!==dashboardRenderToken)return;
       if(!ctx.unchanged){
-        S.dash.cache=STATS.customerDashboardData(ctx.sales,{period:S.dash.period},ctx.reps);
+        S.dash.cache=STATS.customerDashboardData(ctx.sales,{period:S.dash.period,customers:ctx.customers || []},ctx.reps);
         S.dash.cacheRevision=ctx.revision;S.dash.cacheToken=S.dataToken;S.dash.cacheWindow=windowKey;
-        const snapshot={values:[],dashboardAlgorithm:1,dashboard:S.dash.cache,dataRevision:ctx.revision,dashboardWindow:windowKey};
+        const snapshot={values:[],dashboardAlgorithm:2,dashboard:S.dash.cache,dataRevision:ctx.revision,dashboardWindow:windowKey};
         try{localStorage.setItem(DASH_SNAPSHOT_KEY,JSON.stringify(snapshot));}catch(e){}
         trackSave(api('save_report','customerDashboard',snapshot,{},ctx.revision).catch(()=>{}));
         await drawDashboard();
@@ -2771,7 +2784,17 @@
     const dd = S.dash.cache || {};
     const cust = dd.customers ? dd.customers[S.dash.customerNo] : null;
     const titleEl = $('#dash-cust-title');
-    if (titleEl) titleEl.textContent = cust ? cust.no + '  ' + cust.name : '';
+    if (titleEl) {
+      titleEl.textContent = cust ? cust.no + '  ' + cust.name : '';
+      if(cust){
+        const badge=document.createElement('span');
+        badge.textContent=(cust.isNew?'New / ':'')+(cust.status || 'Never');
+        badge.style.cssText='display:inline-block;margin-left:12px;padding:3px 10px;border-radius:5px;font-size:15px;font-weight:700;';
+        badge.style.color=cust.status==='Active'?'#166534':cust.status==='Sleeping'?'#475569':'#854d0e';
+        badge.style.background=cust.status==='Active'?'#dcfce7':cust.status==='Sleeping'?'#e2e8f0':'#fef9c3';
+        titleEl.appendChild(badge);
+      }
+    }
     const moneyHead = (first) => [first, t('dashTotalAmt'), t('dashCabinetAmt'), t('dashStoneAmt')];
     S.dash.yearTotal=[t('total'),'','',''];S.dash.monthTotal=[t('total'),'','',''];
     const yearRows = [moneyHead(t('dashYear'))];
@@ -2999,14 +3022,16 @@
     S.sheetSel = idx;
     highlightSheetRow(row);
     const enable = (id) => { const b = document.getElementById(id); if (b) b.disabled = false; };
-    if (ctx.kind === 'sales') enable('sales-edit');
-    else if (ctx.kind === 'customers') { enable('cust-edit'); enable('cust-del'); }
+    if (ctx.kind === 'sales' && costVisible()) enable('sales-edit');
+    else if (ctx.kind === 'customers' && costVisible()) { enable('cust-edit'); enable('cust-del'); }
     else if (ctx.kind === 'inventory') { enable('inv-edit'); enable('inv-del'); }
     else if (ctx.kind === 'reps') { enable('reps-edit'); enable('reps-del'); }
   }
 
   let salesToken = 0;
   async function renderSales(force=false) {
+    try{S.u.api.getActiveWorkbook().setEditable(true);}catch(e){}
+    try {
     const token = ++salesToken;
     const all = !S.pageSize;   // pageSize=0 = 加载全部
     const tk = 'sales:' + S.dataToken + ':' + JSON.stringify(S.salesFilters) + ':' + S.salesPage + ':' + (all ? 'all' : S.pageSize);
@@ -3043,9 +3068,13 @@
     });
     S.sheetToken[t('tabSales')] = tk;
     S.lastHLRow = null;
+    } finally {
+      try{S.u.api.getActiveWorkbook().setEditable(S.nav!=='sales' || costVisible());}catch(e){}
+    }
   }
 
   function editSalesRow(r) {
+    if(!costVisible()){toast('请先解锁管理权限');return;}
     const fields = [
       { key: 'itemNo', label: t('colItemNo'), value: r.itemNo },
       { key: 'description', label: t('colDesc'), value: r.description },
@@ -3093,6 +3122,7 @@
   }
 
   function editCustomer(row) {
+    if(!costVisible()){toast('请先解锁管理权限');return;}
     const isNew = !row;
     const base = row || { no: '', name: '', city: '', state: '', phone: '', contact: '', type: '', email: '', sales1: '', created: '' };
     const fields = [
@@ -3206,7 +3236,7 @@
   // 用户在 Excel 格子里直接改 姓名/组别 后约 2.5s 自动保存；改 code 列不生效（key 不可变，用编辑按钮改）
   function syncRepsFromGrid() {
     let saved = 0;
-    if (S.nav !== 'reps' || S.isRendering || !S.u || !S.repGrid) return saved;
+    if (!costVisible() || S.nav !== 'reps' || S.isRendering || !S.u || !S.repGrid) return saved;
     let wb = null;
     try { wb = S.u.api.getActiveWorkbook(); } catch (e) { return; }
     const sh = wb.getSheets().find((x) => { try { return x.getSheetName() === S.repSheetName; } catch (e2) { return false; } });
@@ -3605,6 +3635,7 @@
   }
 
   async function importSalesFlow() {
+    if(!costVisible()){toast('请先解锁管理权限');return;}
     let res;
     try { res = await importFileWithFallback('import_sales_files', webImportPickAndParseSales); } catch (e) { toast('Import error: ' + e); return; }
     if (!res || !res.ok) { toast((res && res.error) || 'Import cancelled'); return; }

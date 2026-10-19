@@ -1109,12 +1109,15 @@ window.STATS = (function () {
     };
     const rankStats = { ALL: {}, LAST_MONTH: {}, THIS_YEAR: {}, YTD: {} };
     const customers = {};
+    let latest='';
+    data.forEach(r=>{const dt=date(r.soldDate);if(dt>latest)latest=dt;});
+    const master=new Map((opts.customers || []).map(c=>[String(c.no || '').trim().toUpperCase(),c]));
     data.forEach((r) => {
       const sales1Code = String(r.rep1 || '').trim().toUpperCase();
       if (isIC(sales1Code, groupMap)) return;
       const dt = date(r.soldDate);
       if (!dt) return;
-      const no = String(r.custNo || '').trim();
+      const no = String(r.custNo || '').trim().toUpperCase();
       if (!no) return;
       const name = String(r.custName || '').trim();
       const sales1 = sales1Code, sales2 = String(r.rep2 || '').trim().toUpperCase();
@@ -1125,6 +1128,7 @@ window.STATS = (function () {
           months: monthKeys.reduce((m, k) => ((m[k] = { total: 0, cabinet: 0, stone: 0 }), m), {}) };
       }
       const x = customers[no];
+      if(!x.lastSale || dt>x.lastSale)x.lastSale=dt;
       if (!x.name && name) x.name = name;
       if (sales1) x.sales1Amounts[sales1] = (x.sales1Amounts[sales1] || 0) + amt;
       if (sales1 === 'HO' && sales2) x.sales2Amounts[sales2] = (x.sales2Amounts[sales2] || 0) + amt;
@@ -1147,6 +1151,22 @@ window.STATS = (function () {
         b.totalAmount += amt;
         if (sales1) b.sales1Amounts[sales1] = (b.sales1Amounts[sales1] || 0) + amt;
         if (sales1 === 'HO' && sales2) b.sales2Amounts[sales2] = (b.sales2Amounts[sales2] || 0) + amt;
+      });
+    });
+    master.forEach((c,no)=>{
+      if(!no || isIC(String(c.sales1 || '').toUpperCase(),groupMap))return;
+      if(!customers[no])customers[no]={no,name:c.name || '',totalAmount:0,sales1Amounts:{},sales2Amounts:{},years:{},months:Object.fromEntries(monthKeys.map(k=>[k,{total:0,cabinet:0,stone:0}]))};
+      if(c.name)customers[no].name=c.name;
+    });
+    const anchor=latest || dtext(now), y=Number(anchor.slice(0,4)), m=Number(anchor.slice(5,7));
+    const recentStart=dtext(new Date(y,m-6,1)), newStart=dtext(new Date(y,m-3,1)), newEnd=dtext(new Date(y,m,0));
+    Object.values(customers).forEach(c=>{
+      const info=master.get(c.no) || {}, created=date(info.created);
+      c.status=!c.lastSale?'Never':c.lastSale>=recentStart?'Active':'Sleeping';
+      c.isNew=!!(created && created>=newStart && created<=newEnd);
+      Object.keys(rankStats).forEach(p=>{
+        if(!rankStats[p][c.no])rankStats[p][c.no]={no:c.no,name:c.name,totalAmount:0,sales1Amounts:info.sales1?{[info.sales1]:0}:{},sales2Amounts:info.sales2?{[info.sales2]:0}:{}};
+        else rankStats[p][c.no].name=c.name;
       });
     });
     const main1 = (amts) => {
