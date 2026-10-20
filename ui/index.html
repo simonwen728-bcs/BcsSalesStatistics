@@ -100,7 +100,7 @@
   <link rel="stylesheet" href="sheets-numfmt-ui.css?v=11" />
   <script src="i18n.js?v=30"></script>
   <script src="stats.js?v=23"></script>
-  <script src="app.js?v=111"></script>
+  <script src="app.js?v=112"></script>
   <style>
     * { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; padding: 0; }
@@ -314,6 +314,27 @@
     #status {
       position: fixed; left: 10px; bottom: 6px; font-size: 11px; color: #93a2b8; z-index: 50; pointer-events: none;
     }
+  
+    #wb-reps { flex: 1 1 auto; min-height: 0; }
+    #rep-editor { display:flex;flex-direction:column;height:100%;min-height:0;gap:10px; }
+    .rep-actions { background:#fff;border:1px solid #dce3ed;border-radius:8px;padding:10px;flex:none; }
+    #rep-editor-status { font-size:13px;color:#526782; }
+    .rep-columns { display:grid;grid-template-columns:minmax(350px,1fr) minmax(350px,1fr);gap:14px;flex:1;min-height:0; }
+    .rep-card { background:#fff;border:1px solid #dce3ed;border-radius:8px;display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden; }
+    .rep-card-head { display:flex;align-items:center;gap:10px;padding:12px;flex:none; }
+    .rep-scroll { overflow:auto;flex:1;min-height:0; }
+    .rep-table { width:100%;min-width:450px;table-layout:fixed;border-collapse:separate;border-spacing:0; }
+    .rep-table th,.rep-table td { height:30px;padding:0 5px;border-right:1px solid #d7dfe9;border-bottom:1px solid #d7dfe9;vertical-align:middle;font-size:13px; }
+    .rep-table th { position:sticky;top:0;z-index:1;background:#eef3fb;font-weight:600;text-align:center;border-top:1px solid #d7dfe9; }
+    .rep-table th:first-child,.rep-table td:first-child { border-left:1px solid #d7dfe9; }
+    .rep-table input:not([type=checkbox]),.rep-table select { width:100%;min-width:0;height:26px;border:1px solid transparent;border-radius:3px;padding:0 5px;font-size:13px;background:transparent; }
+    .rep-table input:focus,.rep-table select:focus { border-color:#4385e5;outline:none;background:#fff; }
+    .rep-table input[readonly] { color:#475569;background:#f7f9fc; }
+    .rep-table input[type=checkbox] { width:16px;height:16px;vertical-align:middle; }
+    .rep-center { text-align:center; }
+    .rep-remove { border:0;background:transparent;color:#b42318;cursor:pointer;font-size:13px; }
+    @media(max-width:1050px){.rep-columns{grid-template-columns:1fr;min-height:500px;}.rep-card{min-height:230px;}}
+
   </style>
 </head>
 <body>
@@ -387,16 +408,7 @@
           <span class="info" id="inv-count"></span>
         </div>
       </div>
-        <div id="wb-reps" class="wb-block" style="display:none">
-        <div class="toolbar">
-          <span class="info" data-i18n="repsS1"></span>
-          <button class="btn sm primary" id="reps-add-s1" data-i18n="add"></button>
-          <span class="info" data-i18n="repsS2"></span>
-          <button class="btn sm primary" id="reps-add-s2" data-i18n="add"></button>
-          <button class="btn sm" id="reps-edit" data-i18n="edit" disabled></button>
-          <button class="btn sm danger" id="reps-del" data-i18n="delete" disabled></button>
-        </div>
-      </div>
+        <div id="wb-reps" class="wb-block" style="display:none"><div id="rep-editor"></div></div>
 <div id="wb-history" class="wb-block" style="display:none">
         <div class="toolbar">
           <button class="btn danger" id="hist-del-sel" data-i18n="delSelected" disabled></button>

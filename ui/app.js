@@ -2192,6 +2192,9 @@
       await runStat(def,Object.assign({},collectStatOpts(def)),null);return;
     }
     const cached = S.statResults[def.id];
+    if(def.id==='salesPerformance' && cached?.stale){
+      await runStat(def,Object.assign({},collectStatOpts(def)),null);return;
+    }
     $('#stat-state').textContent = reportState(cached);
     renderStatExtra(def);
     // 切换报表必须切到它自己的表格：
@@ -2307,6 +2310,7 @@
   // 手动保存：与切换/退出时同一套落库链（分组直接编辑 + 客户动态两块面板 + 主画布最近表 + 待写队列）。
   // 平时不动它也行——切换/关闭仍会自动保存；这个按钮用于“改完样式当场保存”。
   async function manualSave() {
+    if(S.nav==='reps')return saveRepGroups();
     try {
       if (S.nav === 'reps' && S.repGrid) {
         const n = syncRepsFromGrid();
@@ -2419,6 +2423,11 @@
     });
   }
   function navigate(id) {
+    if(S.nav==='reps' && id!=='reps' && repEditor?.saving)return;
+    if(S.nav==='reps' && id!=='reps' && repEditorDirty()){
+      if(!confirm(repText('业务分组有未保存修改。放弃修改并离开？','Discard unsaved group changes and leave?')))return;
+    }
+    if(S.nav==='reps' && id!=='reps')repEditor=null;
     if(['customers','inventory','reps','history'].includes(id) && !costVisible()){toast('请先解锁管理权限 / Unlock management first');return;}
     ['sales-import','cust-add','cust-import','cust-sync'].forEach(id=>{const b=document.getElementById(id);if(b)b.disabled=!costVisible();});
     // 离开当前页面时立即落库（不等定时器）：分组直接编辑 + 上一张渲染表的布局/样式调整。
@@ -2460,6 +2469,12 @@
       renderDashboard();   // 客户动态用两块独立 Excel 面板（懒加载引擎），不用主画布
       buildSidebar();
       return;
+    }
+    if(id==='reps'){
+      const panel=document.getElementById('wb-reps');if(panel)panel.style.display='flex';
+      if(um)um.style.display='none';
+      S.sheetCtx=null;S.sheetSel=-1;
+      renderTab('reps');buildSidebar();return;
     }
     initUniver();
 
@@ -3204,89 +3219,113 @@
     });
   }
 
-  // ================= reps page =================
-  async function renderReps() {
-    const tk = 'reps:' + S.dataToken;
-    if (await activateIfFresh(t('tabReps'), tk)) { S.sheetCtx = S.sheetCtxCache[t('tabReps')] || null; return; }
-    const reps = await api('get_all_reps');
-    const s1 = reps.s1 || [], s2 = reps.s2 || [];
-    const values = [[t('repsS1'), '', '', '']];
-    const ctxRows = [];
-    values.push(['', t('repCode'), t('repName'), t('repGroup')]);
-    s1.forEach((r) => { ctxRows.push({ kind: 's1', rec: r }); values.push(['', r.code, r.name, r.group || '']); });
-    values.push(['', '', '', '']);
-    values.push([t('repsS2'), '', '', '']);
-    values.push(['', t('repCode'), t('repName'), t('repGroup')]);
-    s2.forEach((r) => { ctxRows.push({ kind: 's2', rec: r }); values.push(['', r.code, r.name, r.group || '']); });
-    const n = values.length;
-    S.sheetCtx = { kind: 'reps', rows: ctxRows, startRow: 2, colCount: 4 };
-    S.sheetCtxCache[t('tabReps')] = S.sheetCtx;
-    const bold = [rngA(1, 1, 1, 4), rngA(2, 1, 2, 4), rngA(n - s2.length - 1, 1, n - s2.length - 1, 4), rngA(n - s2.length, 1, n - s2.length, 4)];
-    const bg = [{ range: rngA(1, 1, 1, 4), color: '#d9e6f3' }, { range: rngA(n - s2.length - 1, 1, n - s2.length - 1, 4), color: '#d9e6f3' }];
-    await renderSpec({ sheet: t('tabReps'), values, bold, bg, freeze: { rows: 0, cols: 0 } });
-    S.sheetToken[t('tabReps')] = tk;
-    S.lastHLRow = null;
-    // 网格映射：行号 → {kind, code, name, group}（直接编辑同步的基线；B=code C=name D=group）
-    S.repSheetName = t('tabReps');
-    S.repGrid = {};
-    let ri = 0;
-    ctxRows.forEach((e) => {
-      while (ri < values.length && String(values[ri] ? values[ri][1] : '') !== String(e.rec.code)) ri++;
-      S.repGrid[ri] = { kind: e.kind, code: e.rec.code, name: e.rec.name || '', group: e.rec.group || '' };
-      ri++;
-    });
+  // Native form table: independent of the report canvas; changes commit together.
+  let repEditor=null, repEditorRequest=0;
+  function repText(zh,en){return LANG==='zh'?zh:en;}
+  function repEditorDirty(){return !!(repEditor && repEditor.dirty);}
+  function repBaseRow(r){
+    const raw=String(r.group||'').trim(), group=({house:'House',outside:'OutSide','other branch':'Other Branch',ic:'IC',inside:'inside'})[raw.toLowerCase()] || raw;
+    return {code:String(r.code||'').trim().toUpperCase(),name:r.name||'',group};
   }
-
-  // 分组表直接编辑同步：定时对比表格 C/D 列与基线，差异写回数据库（upsert=锁定行）
-  // 用户在 Excel 格子里直接改 姓名/组别 后约 2.5s 自动保存；改 code 列不生效（key 不可变，用编辑按钮改）
-  function syncRepsFromGrid() {
-    let saved = 0;
-    if (!costVisible() || S.nav !== 'reps' || S.isRendering || !S.u || !S.repGrid) return saved;
-    let wb = null;
-    try { wb = S.u.api.getActiveWorkbook(); } catch (e) { return; }
-    const sh = wb.getSheets().find((x) => { try { return x.getSheetName() === S.repSheetName; } catch (e2) { return false; } });
-    if (!sh) return;
-    Object.keys(S.repGrid).forEach((k) => {
-      const ri = Number(k);
-      const e = S.repGrid[k];
-      let row = null;
-      try { row = sh.getRange(ri, 1, 1, 3).getValues()[0]; } catch (err) { return; }
-      const code = String(row[0] === null || row[0] === undefined ? '' : row[0]).trim();
-      if (code !== String(e.code)) return;   // 行被用户挪动/清空 code：不同步，避免写错行
-      const name = String(row[1] === null || row[1] === undefined ? '' : row[1]).trim();
-      const group = String(row[2] === null || row[2] === undefined ? '' : row[2]).trim();
-      if (name !== e.name || group !== e.group) {
-        trackSave(api('upsert_rep', e.kind, JSON.stringify({ code: e.code, name, group })));
-        e.name = name;
-        e.group = group;   // 更新基线，避免重复写库
-        saved++;
+  function repStatus(message,error=false){
+    const el=document.getElementById('rep-editor-status');
+    if(el){el.textContent=message;el.style.color=error?'#b91c1c':'#526782';el.setAttribute('role',error?'alert':'status');}
+  }
+  async function renderReps(){
+    if(!costVisible())return;
+    S.repGrid=null;S.sheetCtx=null;
+    if(!repEditor){
+      const request=++repEditorRequest;
+      const reps=await api('get_all_reps');
+      if(request!==repEditorRequest || S.nav!=='reps')return;
+      if(!Array.isArray(reps.s1)||!Array.isArray(reps.s2)){repStatus(repText('分组加载失败，请重新进入页面。','Could not load groups.'),true);return;}
+      const baseline={s1:reps.s1.map(repBaseRow),s2:reps.s2.map(repBaseRow)};
+      repEditor={baseline,draft:JSON.parse(JSON.stringify(baseline)),revision:reps.revision,dirty:false,saving:false};
+    }
+    drawRepEditor();
+  }
+  function drawRepEditor(){
+    const host=document.getElementById('rep-editor');if(!host || !repEditor)return;
+    const editor=repEditor;
+    const label=(zh,en)=>repText(zh,en);
+    host.innerHTML='<div class="toolbar rep-actions"><strong>'+esc(t('tabReps'))+'</strong><span id="rep-editor-status" role="status">'+
+      esc(editor.dirty?label('有未保存修改','Unsaved changes'):label('已保存','Saved'))+'</span><span class="spacer"></span><button class="btn" id="rep-editor-reset">'+label('取消修改 / 重新加载','Discard / Reload')+'</button><button class="btn primary" id="rep-editor-save">'+label('保存分组','Save groups')+'</button></div><div class="rep-columns">'+
+      ['s1','s2'].map(kind=>{
+        const first=kind==='s1';
+        return '<section class="rep-card"><div class="rep-card-head"><strong>'+label(first?'Sales1 · 业务分组':'Sales2 · Inside 分组',first?'Sales1 · Groups':'Sales2 · Inside')+'</strong><span class="spacer"></span><button class="btn sm" data-rep-add="'+kind+'">'+label('添加销售员','Add rep')+'</button></div><div class="rep-scroll"><table class="rep-table"><colgroup><col style="width:100px"><col style="width:180px"><col style="width:150px"><col style="width:70px"></colgroup><thead><tr><th>Code</th><th>Name</th><th>'+ (first?'Group':'Inside')+'</th><th>'+label('操作','Action')+'</th></tr></thead><tbody>'+editor.draft[kind].map((r,i)=>{
+          const attrs=' data-rep-kind="'+kind+'" data-rep-index="'+i+'"';
+          const options=['','House','OutSide','Other Branch','IC'];if(first&&!options.includes(r.group))options.push(r.group);
+          const fieldLabel=(f)=>' aria-label="'+esc((first?'Sales1 ':'Sales2 ')+(r.code||label('新销售员','new rep'))+' '+f)+'"';
+          return '<tr><td><input data-rep-field="code"'+attrs+fieldLabel('Code')+' value="'+esc(r.code)+'"'+(r._new?'':' readonly')+'></td><td><input data-rep-field="name"'+attrs+fieldLabel('Name')+' value="'+esc(r.name)+'"></td><td class="rep-center">'+
+            (first?'<select data-rep-field="group"'+attrs+fieldLabel('Group')+'>'+options.map(g=>'<option value="'+esc(g)+'"'+(r.group===g?' selected':'')+'>'+esc(g||'—')+'</option>').join('')+'</select>':'<input type="checkbox" data-rep-field="inside"'+attrs+fieldLabel('Inside')+(String(r.group).toLowerCase()==='inside'?' checked':'')+'>')+
+            '</td><td class="rep-center"><button class="rep-remove" data-rep-delete="'+kind+':'+i+'"'+fieldLabel('Delete')+'>'+label('删除','Delete')+'</button></td></tr>';
+        }).join('')+'</tbody></table></div></section>';
+      }).join('')+'</div>';
+    host.querySelectorAll('[data-rep-field]').forEach(input=>{
+      const update=()=>{
+        const row=editor.draft[input.dataset.repKind][Number(input.dataset.repIndex)];
+        if(input.dataset.repField==='inside')row.group=input.checked?'inside':'';
+        else row[input.dataset.repField]=input.value;
+        editor.dirty=true;repStatus(label('有未保存修改','Unsaved changes'));
+        host.querySelector('#rep-editor-save').disabled=false;
+      };
+      input.addEventListener(input.type==='checkbox'||input.tagName==='SELECT'?'change':'input',update);
+    });
+    host.querySelectorAll('[data-rep-add]').forEach(button=>button.onclick=()=>{
+      const kind=button.dataset.repAdd;
+      editor.draft[kind].push({code:'',name:'',group:'',_new:true});editor.dirty=true;drawRepEditor();
+      const inputs=host.querySelectorAll('[data-rep-kind="'+kind+'"][data-rep-field="code"]');inputs[inputs.length-1]?.focus();
+    });
+    host.querySelectorAll('[data-rep-delete]').forEach(button=>button.onclick=async()=>{
+      const [kind,index]=button.dataset.repDelete.split(':'),row=editor.draft[kind][Number(index)];
+      const message=kind==='s2'?label('删除这个 Sales2 人员及对应的 Inside 统计列？历史销售明细和销售总额会保留。保存分组后生效。','Remove this Sales2 rep and its Inside column? Historical sales and total sales remain. Click Save groups to apply.'):
+        label('删除这个 Sales1 分组？部门统计会按默认规则归属，历史销售明细会保留。保存分组后生效。','Remove this Sales1 group? Default department grouping will apply. Historical sales remain. Click Save groups to apply.');
+      if(!await confirmModal((row.code?row.code+' '+row.name+'\n':'')+message,t('delete')))return;
+      if(repEditor!==editor || editor.saving)return;
+      editor.draft[kind].splice(Number(index),1);editor.dirty=true;drawRepEditor();
+    });
+    host.querySelector('#rep-editor-reset').onclick=async()=>{
+      if(editor.dirty&&!await confirmModal(label('放弃未保存修改并重新加载？','Discard unsaved changes and reload?'),t('confirm')))return;
+      repEditor=null;await renderReps();
+    };
+    host.querySelector('#rep-editor-save').onclick=saveRepGroups;
+    host.querySelector('#rep-editor-save').disabled=!editor.dirty;
+  }
+  async function saveRepGroups(){
+    const editor=repEditor;if(!editor||editor.saving||!editor.dirty)return;
+    if(!await checkCostAccess() || editor.saving || repEditor!==editor || S.nav!=='reps')return;
+    const changes={upserts:[],deletes:[]};
+    for(const kind of ['s1','s2']){
+      const seen=new Set(),original=new Map(editor.baseline[kind].map(r=>[r.code,r]));
+      for(const item of editor.draft[kind]){
+        const row={kind,code:String(item.code||'').trim().toUpperCase(),name:String(item.name||'').trim(),group:String(item.group||'').trim()};
+        if(!row.code||/\s/.test(row.code)||seen.has(row.code)){
+          repStatus(repText('销售编号不能为空、含空格或重复：','Blank, spaced or duplicate code: ')+row.code,true);return;
+        }
+        seen.add(row.code);const old=original.get(row.code);
+        if(!old||old.name!==row.name||old.group!==row.group)changes.upserts.push(row);
       }
-    });
-    return saved;
+      for(const row of editor.baseline[kind])if(!seen.has(row.code))changes.deletes.push({kind,code:row.code});
+    }
+    editor.saving=true;
+    const host=document.getElementById('rep-editor');
+    host.querySelectorAll('button,input,select').forEach(el=>el.disabled=true);
+    repStatus(repText('正在保存…','Saving…'));
+    try{
+      const result=await api('save_rep_groups',changes,editor.revision);
+      if(!result?.ok)throw new Error(result?.error==='GROUPS_CHANGED'?repText('数据已被更新。请复制需要保留的修改，再点“重新加载”后保存。','Data changed elsewhere. Copy your edits, reload, then save again.'):(result?.error||repText('保存失败','Save failed')));
+      const baseline={s1:result.reps.s1.map(repBaseRow),s2:result.reps.s2.map(repBaseRow)};
+      repEditor={baseline,draft:JSON.parse(JSON.stringify(baseline)),revision:result.revision,dirty:false,saving:false};
+      invalidateCtx();REPS_CACHE=null;LOOKUP=null;drawRepEditor();saved();
+      toast(repText('分组已保存','Groups saved'));
+    }catch(error){
+      editor.saving=false;host.querySelectorAll('button,input,select').forEach(el=>el.disabled=false);
+      repStatus(String(error.message||error),true);
+    }
   }
-
-  function editRep(kind, row) {
-    const isNew = !row;
-    const base = row || { code: '', name: '', group: '' };
-    const groupHint = kind === 's1' ? 'House / OutSide / Other Branch / IC' : 'inside / (blank)';
-    const fields = [
-      { key: 'code', label: t('repCode'), value: base.code },
-      { key: 'name', label: t('repName'), value: base.name },
-      { key: 'group', label: t('repGroup'), value: base.group, placeholder: groupHint },
-    ];
-    formModal((isNew ? t('add') : t('edit')) + ' — ' + (kind === 's1' ? t('repsS1') : t('repsS2')), fields).then(async (values) => {
-      if (!values || !values.code) return;
-      values.code = values.code.trim().toUpperCase();
-      if (isNew) {
-        const reps = await api('get_all_reps');
-        if (reps[kind].some((x) => x.code.toUpperCase() === values.code)) { toast(tf('dupNo', { no: values.code })); return; }
-      }
-      invalidateCtx();
-      await api('upsert_rep', kind, JSON.stringify(values));
-      renderReps();
-      saved();
-    });
-  }
+  window.addEventListener('beforeunload',event=>{if(repEditorDirty()){event.preventDefault();event.returnValue='';}});
+  // Compatibility with old layout-saving hooks; this page no longer uses a canvas.
+  function syncRepsFromGrid(){return 0;}
 
   // ================= import history page（HTML 多选列表，不进工作表） =================
   async function renderHistory() {
@@ -4112,19 +4151,6 @@
         invalidateCtx();
         await api('delete_stock', e.itemNo);
         renderInventory();
-        saved();
-      }
-    };
-    $('#reps-add-s1').onclick = () => editRep('s1');
-    $('#reps-add-s2').onclick = () => editRep('s2');
-    $('#reps-edit').onclick = () => { const e = sheetSelEntry(); if (e && e.kind) editRep(e.kind, e.rec); };
-    $('#reps-del').onclick = async () => {
-      const e = sheetSelEntry();
-      if (!e || !e.kind) return;
-      if (await confirmModal(tf('delConfirm', { name: e.rec.code + ' ' + e.rec.name }), t('delete'))) {
-        invalidateCtx();
-        await api('delete_rep', e.kind, e.rec.code);
-        renderReps();
         saved();
       }
     };
