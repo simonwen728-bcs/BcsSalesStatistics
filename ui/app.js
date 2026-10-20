@@ -8,6 +8,7 @@
    UniverSheetsFormulaUiEnUS, UniverSheetsNumfmtUiEnUS */
 (function () {
   'use strict';
+  window.BCS_BUILD="Web v9";
 
   // ================= i18n =================
   let LANG = 'en';
@@ -408,6 +409,25 @@
 
   let costToken='', costDeadline=0;
   function costVisible(){return !!costToken && Date.now()<costDeadline;}
+  function refreshManagementAccess(){
+    const unlocked=costVisible();
+    document.querySelectorAll('.nav-item[data-nav-id]').forEach(item=>{
+      const restricted=['customers','inventory','reps','history'].includes(item.dataset.navId);
+      const locked=restricted && !unlocked;
+      item.style.opacity=locked?'.4':'';item.style.cursor=locked?'not-allowed':'';
+      if(locked)item.setAttribute('aria-disabled','true');else item.removeAttribute('aria-disabled');
+    });
+    document.querySelectorAll('.dd-item[data-management="true"]').forEach(item=>{
+      item.style.opacity=unlocked?'':'.4';item.style.cursor=unlocked?'':'not-allowed';
+      if(unlocked)item.removeAttribute('aria-disabled');else item.setAttribute('aria-disabled','true');
+    });
+    ['sales-import','cust-add','cust-import','cust-sync','inv-add','inv-import','inv-sync'].forEach(id=>{
+      const button=document.getElementById(id);if(button)button.disabled=!unlocked;
+    });
+    if(!unlocked)['sales-edit','cust-edit','cust-del','inv-edit','inv-del'].forEach(id=>{
+      const button=document.getElementById(id);if(button)button.disabled=true;
+    });
+  }
   async function checkCostAccess(){
     if(!costVisible())return false;
     const status=await api('cost_status');
@@ -415,7 +435,7 @@
     return true;
   }
   async function unlockCost(){
-    if(await checkCostAccess()){toast(LANG==='zh'?'管理权限已解锁':'Cost is unlocked');return;}
+    if(await checkCostAccess()){refreshManagementAccess();toast(LANG==='zh'?'管理权限已解锁':'Cost is unlocked');return;}
     const data=await formModal(LANG==='zh'?'解锁管理权限':'Unlock management',[
       {key:'password',label:LANG==='zh'?'管理密码':'Management password',type:'password',value:''}
     ]);
@@ -424,14 +444,22 @@
     if(!result.ok){toast(result.error==='COST_PASSWORD_NOT_CONFIGURED'?
       '请在 Render 设置 COST_VIEW_PASSWORD':result.error==='TOO_MANY_ATTEMPTS'?'尝试过多，请一分钟后再试':'密码不正确');return;}
     costToken=result.token;costDeadline=Date.now()+result.expiresIn*1000;
+    // Refresh access immediately; sheet cleanup must never delay or undo it.
+    refreshManagementAccess();
+    buildMenus();buildSidebar();
     // Drop privilege-dependent in-memory results and rebuild the current view.
     S.ctxCache=null;S.dataToken++;S.sheetToken={};
     delete S.statResults.salesHistory;delete S.reportsLoaded.salesHistory;
     S.costRefreshHistory=true;
-    await clearAllStatSheets();
-    buildMenus();
-    navigate(S.nav);
-    toast(LANG==='zh'?'管理权限已解锁，当前页面已更新':'Cost unlocked; view refreshed');
+    try{
+      await clearAllStatSheets();
+      navigate(S.nav);
+    }catch(error){
+      console.warn('View refresh after management unlock failed',error);
+    }finally{
+      refreshManagementAccess();
+    }
+    toast(LANG==='zh'?'管理权限已解锁，菜单已更新':'Management unlocked; menus updated');
   }
   function hideCostColumn(spec){
     if(costVisible() || !spec?.values?.length)return spec;
@@ -2263,9 +2291,9 @@
       const it = document.createElement('div');
       it.className = 'dd-item';
       it.textContent = f.label;
-      const locked=f.admin && !costVisible();
-      if(locked){it.style.opacity='.4';it.style.cursor='not-allowed';it.setAttribute('aria-disabled','true');}
-      it.onclick = (e) => { e.stopPropagation(); if(locked)return; closeDropdowns(); f.fn(); };
+      it.dataset.management=f.admin?'true':'false';
+      if(f.admin && !costVisible()){it.style.opacity='.4';it.style.cursor='not-allowed';it.setAttribute('aria-disabled','true');}
+      it.onclick = (e) => { e.stopPropagation(); if(f.admin && !costVisible())return; closeDropdowns(); f.fn(); };
       fileDrop.appendChild(it);
     });
     file.appendChild(fileDrop);
@@ -2415,9 +2443,10 @@
           a.textContent = (n.icon ? n.icon + ' ' : '') + t(n.labelKey);
           a.title = '';
         }
-        const locked=['customers','inventory','reps','history'].includes(n.id) && !costVisible();
-        if(locked){a.style.opacity='.4';a.style.cursor='not-allowed';a.setAttribute('aria-disabled','true');}
-        a.onclick = () => {if(!locked)navigate(n.id);};
+        a.dataset.navId=n.id;
+        const restricted=['customers','inventory','reps','history'].includes(n.id);
+        if(restricted && !costVisible()){a.style.opacity='.4';a.style.cursor='not-allowed';a.setAttribute('aria-disabled','true');}
+        a.onclick = () => {if(!restricted || costVisible())navigate(n.id);};
         sb.appendChild(a);
       }
     });
@@ -3231,13 +3260,33 @@
     const el=document.getElementById('rep-editor-status');
     if(el){el.textContent=message;el.style.color=error?'#b91c1c':'#526782';el.setAttribute('role',error?'alert':'status');}
   }
+  function ensureRepEditorHost(){
+    let panel=document.getElementById('wb-reps');
+    if(!panel){
+      const page=document.getElementById('page-sheet');if(!page)return null;
+      panel=document.createElement('div');panel.id='wb-reps';panel.className='wb-block';page.appendChild(panel);
+    }
+    let host=document.getElementById('rep-editor');
+    if(!host){host=document.createElement('div');host.id='rep-editor';panel.replaceChildren(host);}
+    if(S.nav==='reps')panel.style.display='flex';
+    if(!document.getElementById('rep-editor-styles')){
+      const style=document.createElement('style');style.id='rep-editor-styles';style.textContent="    #wb-reps { flex: 1 1 auto; min-height: 0; }\n    #rep-editor { display:flex;flex-direction:column;height:100%;min-height:0;gap:10px; }\n    .rep-actions { background:#fff;border:1px solid #dce3ed;border-radius:8px;padding:10px;flex:none; }\n    #rep-editor-status { font-size:13px;color:#526782; }\n    .rep-columns { display:grid;grid-template-columns:minmax(350px,1fr) minmax(350px,1fr);gap:14px;flex:1;min-height:0; }\n    .rep-card { background:#fff;border:1px solid #dce3ed;border-radius:8px;display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden; }\n    .rep-card-head { display:flex;align-items:center;gap:10px;padding:12px;flex:none; }\n    .rep-scroll { overflow:auto;flex:1;min-height:0; }\n    .rep-table { width:100%;min-width:450px;table-layout:fixed;border-collapse:separate;border-spacing:0; }\n    .rep-table th,.rep-table td { height:30px;padding:0 5px;border-right:1px solid #d7dfe9;border-bottom:1px solid #d7dfe9;vertical-align:middle;font-size:13px; }\n    .rep-table th { position:sticky;top:0;z-index:1;background:#eef3fb;font-weight:600;text-align:center;border-top:1px solid #d7dfe9; }\n    .rep-table th:first-child,.rep-table td:first-child { border-left:1px solid #d7dfe9; }\n    .rep-table input:not([type=checkbox]),.rep-table select { width:100%;min-width:0;height:26px;border:1px solid transparent;border-radius:3px;padding:0 5px;font-size:13px;background:transparent; }\n    .rep-table input:focus,.rep-table select:focus { border-color:#4385e5;outline:none;background:#fff; }\n    .rep-table input[readonly] { color:#475569;background:#f7f9fc; }\n    .rep-table input[type=checkbox] { width:16px;height:16px;vertical-align:middle; }\n    .rep-center { text-align:center; }\n    .rep-remove { border:0;background:transparent;color:#b42318;cursor:pointer;font-size:13px; }\n    @media(max-width:1050px){.rep-columns{grid-template-columns:1fr;min-height:500px;}.rep-card{min-height:230px;}}\n\n  ";
+      document.head.appendChild(style);
+    }
+    return host;
+  }
   async function renderReps(){
     if(!costVisible())return;
+    const host=ensureRepEditorHost();
+    if(!repEditor && host)host.innerHTML='<div id="rep-editor-status" role="status">'+repText('正在加载业务分组…','Loading rep groups…')+'</div>';
     S.repGrid=null;S.sheetCtx=null;
     if(!repEditor){
       const request=++repEditorRequest;
-      const reps=await api('get_all_reps');
+      let reps;
+      try{reps=await api('get_all_reps');}
+      catch(error){repStatus(repText('业务分组加载失败：','Could not load groups: ')+String(error.message||error),true);return;}
       if(request!==repEditorRequest || S.nav!=='reps')return;
+      if(!reps?.revision){repStatus(repText('后端版本尚未更新，请确认已部署项目根目录的 server.py。','Backend update required. Deploy server.py in the project root.'),true);return;}
       if(!Array.isArray(reps.s1)||!Array.isArray(reps.s2)){repStatus(repText('分组加载失败，请重新进入页面。','Could not load groups.'),true);return;}
       const baseline={s1:reps.s1.map(repBaseRow),s2:reps.s2.map(repBaseRow)};
       repEditor={baseline,draft:JSON.parse(JSON.stringify(baseline)),revision:reps.revision,dirty:false,saving:false};
@@ -3245,7 +3294,7 @@
     drawRepEditor();
   }
   function drawRepEditor(){
-    const host=document.getElementById('rep-editor');if(!host || !repEditor)return;
+    const host=ensureRepEditorHost();if(!host || !repEditor)return;
     const editor=repEditor;
     const label=(zh,en)=>repText(zh,en);
     host.innerHTML='<div class="toolbar rep-actions"><strong>'+esc(t('tabReps'))+'</strong><span id="rep-editor-status" role="status">'+
