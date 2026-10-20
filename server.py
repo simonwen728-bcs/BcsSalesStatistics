@@ -1,0 +1,1724 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+BCS 销售统计 - 外部 PostgreSQL / 本地 SQLite 双模式后端
+Render 必须设置 DATABASE_URL；依赖见 requirements.txt。
+
+运行:  python server.py            (默认端口 18789)
+       python server.py --port 8080
+数据:  ./data/bcs_data.db          (SQLite，程序文件夹内)
+设置:  数据库 bcs_prefs 表（旧 prefs.json 自动迁移缺失键）
+"""
+import argparse
+import gzip
+import uuid
+import io
+import json
+import os
+import re
+import shutil
+import sqlite3
+import sys
+import tempfile
+from storage import PostgresConnection, DATABASE_URL
+import threading
+import time
+import urllib.parse
+import urllib.request
+import webbrowser
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.environ.get("BCS_DATA_DIR", os.path.join(BASE_DIR, "data"))
+DB_PATH = os.path.join(DATA_DIR, "bcs_data.db")
+PREFS_PATH = os.path.join(DATA_DIR, "prefs.json")
+# 报价工具共享文档的 Pull 接口（合并接口）：石材库存直接读这里的 Pull，不再用销售统计表里的 StoneStock 页签。
+# Pull 11 列：No.=0, Description=1, Item Type=2, Qty.(On Hand)=3, Available for Sales Qty.=4,
+# Qty.(Transit)=5, Unit Price=6, Blocked=7, Only PO=8, Color=9, Category=10
+QUOTE_PULL_API_URL = os.environ.get(
+    "QUOTE_PULL_API_URL",
+    "https://script.google.com/macros/s/AKfycbxNRW6qfXFVunloGzMmFbw0WgaHYqs2OHpA40O-fpsm2WKv_1E7s-eXV-0pX-X6Slw8pQ/exec",
+)
+UI_DIR = os.path.join(BASE_DIR, "ui")
+
+os.makedirs(DATA_DIR, exist_ok=True)
+
+MASTER_SYNC_LOCK = threading.Lock()
+DB_LOCK = threading.RLock()
+PREFS_LOCK = threading.RLock()
+
+
+# ================= 数据库 =================
+
+SCHEMA = "\n            CREATE TABLE IF NOT EXISTS sales (\n              id TEXT PRIMARY KEY, batch_id TEXT NOT NULL, month TEXT NOT NULL,\n              item_no TEXT DEFAULT '', description TEXT DEFAULT '', color TEXT DEFAULT '',\n              name TEXT DEFAULT '', type TEXT DEFAULT '', category TEXT DEFAULT '',\n              product_type TEXT DEFAULT '', sold_date TEXT DEFAULT '', invoice TEXT DEFAULT '',\n              ledger TEXT DEFAULT '', cust_no TEXT DEFAULT '', cust_name TEXT DEFAULT '',\n              rep1 TEXT DEFAULT '', rep1_name TEXT DEFAULT '', rep2 TEXT DEFAULT '',\n              rep2_name TEXT DEFAULT '', qty REAL DEFAULT 0, amount REAL DEFAULT 0, cost REAL DEFAULT 0\n            );\n            CREATE TABLE IF NOT EXISTS customers (\n              no TEXT PRIMARY KEY, name TEXT DEFAULT '', city TEXT DEFAULT '',\n              state TEXT DEFAULT '', phone TEXT DEFAULT '', contact TEXT DEFAULT '',\n              type TEXT DEFAULT '', email TEXT DEFAULT '', sales1 TEXT DEFAULT '',\n              created_at TEXT DEFAULT ''\n            );\n            CREATE TABLE IF NOT EXISTS stock (\n              item_no TEXT PRIMARY KEY, description TEXT DEFAULT '',\n              available REAL DEFAULT 0, in_transit REAL DEFAULT 0\n            );\n            CREATE TABLE IF NOT EXISTS reps (\n              kind TEXT NOT NULL, code TEXT NOT NULL, name TEXT DEFAULT '',\n              group_ TEXT DEFAULT '', locked INTEGER DEFAULT 0, deleted INTEGER DEFAULT 0,\n              PRIMARY KEY (kind, code)\n            );\n            CREATE TABLE IF NOT EXISTS batches (\n              id TEXT PRIMARY KEY, month TEXT NOT NULL, file TEXT DEFAULT '',\n              rows INTEGER DEFAULT 0, imported_at TEXT DEFAULT ''\n            );\n            CREATE TABLE IF NOT EXISTS meta (\n              key TEXT PRIMARY KEY, value TEXT DEFAULT ''\n            );\n            CREATE INDEX IF NOT EXISTS idx_sales_month ON sales(month);\n            CREATE INDEX IF NOT EXISTS idx_sales_date ON sales(sold_date);\n            CREATE INDEX IF NOT EXISTS idx_sales_item ON sales(item_no);\n            CREATE INDEX IF NOT EXISTS idx_sales_cust ON sales(cust_no);\n            CREATE INDEX IF NOT EXISTS idx_sales_batch ON sales(batch_id);\n            \nCREATE TABLE IF NOT EXISTS bcs_prefs (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
+
+
+def connect():
+    if DATABASE_URL:
+        return PostgresConnection()
+    if os.environ.get("RENDER") == "true":
+        raise RuntimeError("请先设置 DATABASE_URL；Render 上禁止使用临时本地数据库。")
+    con = sqlite3.connect(DB_PATH)
+    con.row_factory = sqlite3.Row
+    return con
+
+
+def init_db():
+    with DB_LOCK:
+        con = connect()
+        try:
+            con.executescript(SCHEMA)
+            con.execute("CREATE INDEX IF NOT EXISTS idx_sales_date_invoice_id ON sales(sold_date DESC,invoice,id)")
+            con.execute("CREATE INDEX IF NOT EXISTS idx_sales_type_date_invoice_id ON sales(type,sold_date DESC,invoice,id)")
+            con.execute("INSERT INTO bcs_prefs(key,value) VALUES (?,?) ON CONFLICT(key) DO NOTHING",
+                        ("dataRevision", json.dumps(uuid.uuid4().hex)))
+            con.commit()
+        finally:
+            con.close()
+
+
+# ================= 工具 =================
+
+def row_to_sale(r):
+    return {
+        "id": r["id"], "month": r["month"] or "", "itemNo": r["item_no"] or "",
+        "description": r["description"] or "", "color": r["color"] or "",
+        "name": r["name"] or "", "type": r["type"] or "",
+        "category": r["category"] or "", "productType": r["product_type"] or "",
+        "soldDate": r["sold_date"] or "", "invoice": r["invoice"] or "",
+        "ledger": r["ledger"] or "", "custNo": r["cust_no"] or "",
+        "custName": r["cust_name"] or "", "rep1": r["rep1"] or "",
+        "rep1Name": r["rep1_name"] or "", "rep2": r["rep2"] or "",
+        "rep2Name": r["rep2_name"] or "", "qty": r["qty"] or 0,
+        "amount": r["amount"] or 0, "cost": r["cost"] or 0,
+        "batchId": r["batch_id"] or "",
+    }
+
+
+def row_to_customer(r):
+    return {
+        "no": r["no"] or "", "name": r["name"] or "", "city": r["city"] or "",
+        "state": r["state"] or "", "phone": r["phone"] or "",
+        "contact": r["contact"] or "", "type": r["type"] or "",
+        "email": r["email"] or "", "sales1": r["sales1"] or "",
+        "created": r["created_at"] or "",
+    }
+
+
+def row_to_stock(r):
+    return {
+        "itemNo": r["item_no"] or "", "description": r["description"] or "",
+        "available": r["available"] or 0, "inTransit": r["in_transit"] or 0,
+    }
+
+
+def row_to_rep(r):
+    return {
+        "code": r["code"] or "", "name": r["name"] or "",
+        "group": r["group_"] or "", "locked": bool(r["locked"]),
+    }
+
+
+
+def normalize_rep(kind, value):
+    if kind not in ("s1", "s2") or not isinstance(value, dict):
+        raise ValueError("销售员类型或数据格式错误")
+    code = str(value.get("code") or "").strip().upper()
+    if not code or len(code) > 64 or any(c.isspace() or ord(c) < 32 for c in code):
+        raise ValueError("销售编号不能为空，也不能包含空格")
+    name = str(value.get("name") or "").strip()
+    group = str(value.get("group") or "").strip()
+    allowed = {"": "", "house": "House", "outside": "OutSide", "other branch": "Other Branch", "ic": "IC"} if kind == "s1" else {"": "", "inside": "inside"}
+    if group.lower() not in allowed:
+        raise ValueError("销售分组无效: " + group)
+    return {"kind": kind, "code": code, "name": name, "group": allowed[group.lower()]}
+
+
+def write_rep(con, rep, deleted=False):
+    con.execute("""INSERT INTO reps(kind,code,name,group_,locked,deleted) VALUES (?,?,?,?,1,?)
+        ON CONFLICT(kind,code) DO UPDATE SET name=excluded.name,group_=excluded.group_,locked=1,deleted=excluded.deleted""",
+        (rep["kind"], rep["code"], rep["name"], rep["group"], int(deleted)))
+    if os.environ.get("BCS_LOCAL_DESKTOP") == "1":
+        row = con.execute("SELECT value FROM bcs_prefs WHERE key='localRepOverrides'").fetchone()
+        overrides = json.loads(row[0]) if row else {}
+        overrides[rep["kind"] + ":" + rep["code"]] = dict(rep, deleted=bool(deleted))
+        con.execute("INSERT INTO bcs_prefs(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    ("localRepOverrides", json.dumps(overrides, ensure_ascii=False)))
+
+def get_reps_group_map(con):
+    """rep1 code(大写) -> group(大写)，用于销售行的 code/group 富化。"""
+    m = {}
+    for r in con.execute("SELECT code, group_ FROM reps WHERE kind='s1' AND (deleted IS NULL OR deleted=0)"):
+        m[(r["code"] or "").strip().upper()] = (r["group_"] or "").strip().upper()
+    return m
+
+
+def enrich_sale(s, group_map):
+    code = (s.get("rep1") or "").strip().upper()
+    s["code"] = code
+    s["group"] = group_map.get(code, "")
+    return s
+
+
+def now_str():
+    return datetime.now().strftime("%Y-%m-%d %H:%M")
+
+
+# ================= prefs (界面设置:行高列宽等) =================
+
+def bump_data_revision(con):
+    con.execute("INSERT INTO bcs_prefs(key,value) VALUES (?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                ("dataRevision", json.dumps(uuid.uuid4().hex)))
+
+
+def read_data_revision(con):
+    row = con.execute("SELECT value FROM bcs_prefs WHERE key=?", ("dataRevision",)).fetchone()
+    return json.loads(row[0]) if row else "uninitialized"
+
+
+def prefs_load(include_reports=False):
+    with DB_LOCK:
+        con = connect()
+        try:
+            sql = "SELECT key,value FROM bcs_prefs"
+            if not include_reports:
+                sql += " WHERE key NOT LIKE 'report:%'"
+            return {r[0]: json.loads(r[1]) for r in con.execute(sql)}
+        finally:
+            con.close()
+
+
+def pref_set(key, value):
+    with DB_LOCK:
+        con = connect()
+        try:
+            con.execute("INSERT INTO bcs_prefs (key,value) VALUES (?,?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        (str(key), json.dumps(value, ensure_ascii=False)))
+            con.commit()
+        finally:
+            con.close()
+
+
+def migrate_local_prefs():
+    # Only fills missing keys; never replaces settings already in the database.
+    if not os.path.exists(PREFS_PATH):
+        return
+    with open(PREFS_PATH, encoding="utf-8") as f:
+        old = json.load(f)
+    with DB_LOCK:
+        con = connect()
+        try:
+            for key, value in old.items():
+                con.execute("INSERT INTO bcs_prefs (key,value) VALUES (?,?) ON CONFLICT(key) DO NOTHING",
+                            (key, json.dumps(value, ensure_ascii=False)))
+            con.commit()
+        finally:
+            con.close()
+
+
+# ================= API 实现 =================
+
+class Api:
+    # ---- 销售记录 ----
+    def query_sales(self, offset=0, limit=200, filters_json=""):
+        try:
+            f = json.loads(filters_json) if filters_json else {}
+        except Exception:
+            f = {}
+        where, params = [], []
+        q = (f.get("q") or "").strip()
+        if q:
+            like = "%" + q + "%"
+            where.append("(item_no LIKE ? OR description LIKE ? OR color LIKE ? OR type LIKE ?"
+                         " OR invoice LIKE ? OR cust_no LIKE ? OR cust_name LIKE ?"
+                         " OR rep1 LIKE ? OR rep2 LIKE ? OR month LIKE ?)")
+            params += [like] * 10
+        if f.get("start"):
+            where.append("sold_date >= ?"); params.append(f["start"])
+        if f.get("end"):
+            where.append("sold_date <= ?"); params.append(f["end"])
+        if f.get("custNo"):
+            where.append("cust_no LIKE ?"); params.append("%" + f["custNo"] + "%")
+        if f.get("itemNo"):
+            where.append("item_no LIKE ?"); params.append("%" + f["itemNo"] + "%")
+        if f.get("invoice"):
+            where.append("invoice LIKE ?"); params.append("%" + f["invoice"] + "%")
+        if f.get("type"):
+            where.append("type = ?"); params.append(f["type"])
+        # 前端会传这些条件，之前服务端静默忽略（描述/客户名/颜色/业务员筛选不起作用）
+        if f.get("custName"):
+            where.append("cust_name LIKE ?"); params.append("%" + f["custName"] + "%")
+        if f.get("description"):
+            where.append("description LIKE ?"); params.append("%" + f["description"] + "%")
+        if f.get("color"):
+            where.append("color LIKE ?"); params.append("%" + f["color"] + "%")
+        if f.get("rep1"):
+            where.append("rep1 LIKE ?"); params.append("%" + f["rep1"] + "%")
+        w = ("WHERE " + " AND ".join(where)) if where else ""
+        offset = max(0, int(offset))
+        limit = max(1, min(60000, int(limit)))
+        with DB_LOCK:
+            con = connect()
+            try:
+                revision = read_data_revision(con)
+                cache = getattr(self, "_sales_query_cache", None)
+                if not cache or cache["revision"] != revision:
+                    cache = {"revision": revision, "pages": {}, "counts": {}, "groups": None}
+                    self._sales_query_cache = cache
+                filter_key = (w, tuple(params))
+                page_key = (filter_key, offset, limit)
+                if page_key in cache["pages"]:
+                    return cache["pages"][page_key]
+                rows = con.execute(
+                    "SELECT * FROM sales " + w + " ORDER BY sold_date DESC, invoice, id LIMIT ? OFFSET ?",
+                    params + [limit, offset]).fetchall()
+                # A short first page already gives the exact total; avoid another table scan.
+                if offset == 0 and len(rows) < limit:
+                    total = len(rows)
+                elif filter_key in cache["counts"]:
+                    total = cache["counts"][filter_key]
+                else:
+                    total = con.execute("SELECT COUNT(*) FROM sales " + w, params).fetchone()[0]
+                if len(cache["counts"]) >= 128:
+                    cache["counts"].clear()
+                cache["counts"][filter_key] = total
+                if cache["groups"] is None:
+                    cache["groups"] = get_reps_group_map(con)
+                result = {"total": total, "rows": [enrich_sale(row_to_sale(r), cache["groups"]) for r in rows]}
+                # Bound page-cache memory; full-history queries are deliberately not retained.
+                if limit <= 1000:
+                    if len(cache["pages"]) >= 32:
+                        cache["pages"].pop(next(iter(cache["pages"])))
+                    cache["pages"][page_key] = result
+                return result
+            finally:
+                con.close()
+
+    def update_sale(self, sale_id, values_json):
+        try:
+            values = json.loads(values_json) if isinstance(values_json, str) else (values_json or {})
+        except Exception:
+            return {"ok": False, "error": "bad values"}
+        allowed = {"item_no": "itemNo", "description": "description", "color": "color",
+                   "type": "type", "sold_date": "soldDate", "invoice": "invoice",
+                   "cust_no": "custNo", "cust_name": "custName", "rep1": "rep1",
+                   "rep1_name": "rep1Name", "rep2": "rep2", "rep2_name": "rep2Name",
+                   "qty": "qty", "amount": "amount", "cost": "cost", "month": "month"}
+        sets, params = [], []
+        for col, key in allowed.items():
+            if key in values:
+                sets.append(col + " = ?")
+                params.append(values[key])
+        if not sets:
+            return {"ok": False, "error": "nothing to update"}
+        params.append(sale_id)
+        with DB_LOCK:
+            con = connect()
+            try:
+                con.execute("UPDATE sales SET " + ", ".join(sets) + " WHERE id=?", params)
+                bump_data_revision(con)
+                con.commit()
+            finally:
+                con.close()
+        return {"ok": True}
+
+    # ---- 导入 ----
+    def apply_sales_import(self, payload_json):
+        try:
+            p = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
+        except Exception:
+            return {"ok": False, "error": "bad payload"}
+        month = (p.get("month") or "").strip()
+        file = p.get("file") or ""
+        records = p.get("records") or []
+        if not re.match(r"^\d{4}-\d{2}$", month):
+            return {"ok": False, "error": "bad month"}
+        batch_id = "b_" + month
+        with DB_LOCK:
+            con = connect()
+            try:
+                con.execute("DELETE FROM sales WHERE batch_id=?", (batch_id,))
+                n = 0
+                pending_rows = []
+                for i, r in enumerate(records):
+                    rid = "%s_%d" % (batch_id, i)
+                    m = (r.get("soldDate") or "")[:7]
+                    if not re.match(r"^\d{4}-\d{2}$", m):
+                        m = month
+                    insert_sql = """INSERT OR REPLACE INTO sales
+                        (id,batch_id,month,item_no,description,color,name,type,category,product_type,
+                         sold_date,invoice,ledger,cust_no,cust_name,rep1,rep1_name,rep2,rep2_name,qty,amount,cost)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"""
+                    pending_rows.append((rid, batch_id, m, r.get("itemNo") or "", r.get("description") or "",
+                         r.get("color") or "", r.get("name") or "", r.get("type") or "",
+                         r.get("category") or "", r.get("productType") or "",
+                         r.get("soldDate") or "", r.get("invoice") or "", r.get("ledger") or "",
+                         r.get("custNo") or "", r.get("custName") or "",
+                         r.get("rep1") or "", r.get("rep1Name") or "",
+                         r.get("rep2") or "", r.get("rep2Name") or "",
+                         _num(r.get("qty")), _num(r.get("amount")), _num(r.get("cost"))))
+                    n += 1
+                if pending_rows:
+                    con.executemany(insert_sql, pending_rows)
+                con.execute(
+                    "INSERT OR REPLACE INTO batches (id,month,file,rows,imported_at) VALUES (?,?,?,?,?)",
+                    (batch_id, month, file, n, now_str()))
+                synced = self._sync_reps_from_records(con)
+                bump_data_revision(con)
+                con.commit()
+            finally:
+                con.close()
+        return {"ok": True, "rows": n, "repsSynced": synced}
+
+    def _sync_reps_from_records(self, con):
+        """从销售记录收集 rep1/rep2，补入 reps 表(不覆盖已有)。返回 {s1, s2} 新增数。"""
+        have_s1 = {r[0] for r in con.execute("SELECT code FROM reps WHERE kind='s1'")}
+        have_s2 = {r[0] for r in con.execute("SELECT code FROM reps WHERE kind='s2'")}
+        add_s1, add_s2 = 0, 0
+        for code, name in con.execute("SELECT DISTINCT rep1, rep1_name FROM sales WHERE rep1<>''"):
+            c = (code or "").strip().upper()
+            if c and c not in have_s1:
+                con.execute("INSERT OR IGNORE INTO reps (kind,code,name,group_) VALUES ('s1',?,?,?)",
+                            (c, (name or "").strip(), ""))
+                have_s1.add(c); add_s1 += 1
+        for code, name in con.execute("SELECT DISTINCT rep2, rep2_name FROM sales WHERE rep2<>''"):
+            c = (code or "").strip().upper()
+            if c and c not in have_s2:
+                con.execute("INSERT OR IGNORE INTO reps (kind,code,name,group_) VALUES ('s2',?,?,?)",
+                            (c, (name or "").strip(), ""))
+                have_s2.add(c); add_s2 += 1
+        return {"s1": add_s1, "s2": add_s2}
+
+    def delete_batch(self, batch_id):
+        with DB_LOCK:
+            con = connect()
+            try:
+                con.execute("DELETE FROM sales WHERE batch_id=?", (batch_id,))
+                con.execute("DELETE FROM batches WHERE id=?", (batch_id,))
+                bump_data_revision(con)
+                con.commit()
+            finally:
+                con.close()
+        return {"ok": True}
+
+    def list_batches(self):
+        with DB_LOCK:
+            con = connect()
+            try:
+                rows = con.execute("SELECT * FROM batches ORDER BY month").fetchall()
+            finally:
+                con.close()
+        return [{"id": r["id"], "month": r["month"], "file": r["file"] or "",
+                 "rows": r["rows"] or 0, "importedAt": r["imported_at"] or ""} for r in rows]
+
+    # ---- 统计上下文(报表/客户动态用) ----
+    def get_annual_context(self, known_revision=""):
+        with DB_LOCK:
+            con = connect()
+            try:
+                revision = read_data_revision(con)
+                if known_revision and known_revision == revision:
+                    return {"unchanged": True, "revision": revision}
+                cached = getattr(self, "_annual_cache", None)
+                if cached and cached["revision"] == revision:
+                    return cached
+                # 完整月份适用于年度/月度及TTM；非标准日期保持原值交给前端原日期解析器。
+                rows = con.execute("""
+                    SELECT CASE WHEN LENGTH(sold_date)=10
+                        AND sold_date LIKE '____-__-__'
+                        AND SUBSTR(sold_date,6,2) BETWEEN '01' AND '12'
+                        AND SUBSTR(sold_date,9,2) BETWEEN '01' AND '31'
+                        THEN SUBSTR(sold_date,1,7) || '-01' ELSE sold_date END AS period,
+                        type, rep1, SUM(amount) AS amount
+                    FROM sales
+                    GROUP BY 1,2,3
+                    ORDER BY 1,2,3
+                """).fetchall()
+            finally:
+                con.close()
+            result = {"sales": [{"soldDate": r[0] or "", "type": r[1] or "",
+                                 "rep1": r[2] or "", "amount": r[3] or 0} for r in rows],
+                      "revision": revision}
+            self._annual_cache = result
+            return result
+
+    def get_performance_context(self, start="", end="", known_revision=""):
+        where, params = [], []
+        if start:
+            where.append("sold_date >= ?"); params.append(start)
+        if end:
+            where.append("sold_date <= ?"); params.append(end)
+        condition = " WHERE " + " AND ".join(where) if where else ""
+        with DB_LOCK:
+            con = connect()
+            try:
+                revision = read_data_revision(con)
+                if known_revision and known_revision == revision:
+                    return {"unchanged": True, "revision": revision}
+                cache = getattr(self, "_performance_cache", {})
+                key = (revision, start, end)
+                if key in cache:
+                    return cache[key]
+                # 正负分组避免相抵后丢失原本应显示的零净额业务员。
+                # seq 保留缺失分组时首次出现的业务员名称选择顺序。
+                rows = con.execute("""
+                    WITH source AS (
+                      SELECT sold_date,rep1,rep2,rep1_name,amount,
+                             ROW_NUMBER() OVER (ORDER BY sold_date,invoice,id) AS seq
+                      FROM sales""" + condition + """
+                    ), grouped_source AS (
+                      SELECT *, CASE WHEN LENGTH(sold_date)=10
+                        AND sold_date LIKE '____-__-__'
+                        AND SUBSTR(sold_date,6,2) BETWEEN '01' AND '12'
+                        AND SUBSTR(sold_date,9,2) BETWEEN '01' AND '31'
+                        THEN '' ELSE sold_date END AS date_bucket,
+                        CASE WHEN amount>0 THEN 1 WHEN amount<0 THEN -1 ELSE 0 END AS amount_sign
+                      FROM source
+                    )
+                    SELECT MIN(sold_date),rep1,rep2,rep1_name,SUM(amount),MIN(seq)
+                    FROM grouped_source
+                    GROUP BY date_bucket,rep1,rep2,rep1_name,amount_sign
+                    ORDER BY MIN(seq)
+                """, params).fetchall()
+                reps = {kind: [row_to_rep(r) for r in con.execute(
+                    "SELECT * FROM reps WHERE kind=? AND (deleted IS NULL OR deleted=0) ORDER BY code", (kind,))]
+                    for kind in ("s1", "s2")}
+            finally:
+                con.close()
+            result = {"sales": [{"soldDate": r[0] or "", "rep1": r[1] or "", "rep2": r[2] or "",
+                                  "rep1Name": r[3] or "", "amount": r[4] or 0} for r in rows],
+                      "reps": reps, "revision": revision}
+            if len(cache) >= 8:
+                cache = {}
+            cache[key] = result
+            self._performance_cache = cache
+            return result
+
+    def get_orders_context(self, start="", end="", known_revision=""):
+        where, params = [], []
+        if start:
+            where.append("sold_date >= ?"); params.append(start)
+        if end:
+            where.append("sold_date <= ?"); params.append(end)
+        condition = " WHERE " + " AND ".join(where) if where else ""
+        with DB_LOCK:
+            con = connect()
+            try:
+                revision = read_data_revision(con)
+                if known_revision and known_revision == revision:
+                    return {"unchanged": True, "revision": revision}
+                cache = getattr(self, "_orders_cache", {})
+                key = (revision, start, end)
+                if key in cache:
+                    return cache[key]
+                # 正负分组避免相抵后丢失原本应显示的零净额业务员。
+                # seq 保留缺失分组时首次出现的业务员名称选择顺序。
+                rows = con.execute("""
+                    WITH source AS (
+                      SELECT sold_date,rep1,rep2,rep1_name,invoice,cust_no,type,amount,
+                             ROW_NUMBER() OVER (ORDER BY sold_date,invoice,id) AS seq
+                      FROM sales""" + condition + """
+                    ), grouped_source AS (
+                      SELECT *, CASE WHEN LENGTH(sold_date)=10
+                        AND sold_date LIKE '____-__-__'
+                        AND SUBSTR(sold_date,6,2) BETWEEN '01' AND '12'
+                        AND SUBSTR(sold_date,9,2) BETWEEN '01' AND '31'
+                        THEN '' ELSE sold_date END AS date_bucket,
+                        CASE WHEN amount>0 THEN 1 WHEN amount<0 THEN -1 ELSE 0 END AS amount_sign
+                      FROM source
+                    )
+                    SELECT MIN(sold_date),rep1,rep2,rep1_name,SUM(amount),invoice,cust_no,type,MIN(seq)
+                    FROM grouped_source
+                    GROUP BY date_bucket,rep1,rep2,rep1_name,invoice,cust_no,type,amount_sign
+                    ORDER BY MIN(seq)
+                """, params).fetchall()
+                reps = {kind: [row_to_rep(r) for r in con.execute(
+                    "SELECT * FROM reps WHERE kind=? AND (deleted IS NULL OR deleted=0) ORDER BY code", (kind,))]
+                    for kind in ("s1", "s2")}
+            finally:
+                con.close()
+            result = {"sales": [{"soldDate": r[0] or "", "rep1": r[1] or "", "rep2": r[2] or "",
+                                  "rep1Name": r[3] or "", "amount": r[4] or 0,
+                                  "invoice": r[5] or "", "custNo": r[6] or "", "type": r[7] or ""} for r in rows],
+                      "reps": reps, "revision": revision}
+            if len(cache) >= 8:
+                cache = {}
+            cache[key] = result
+            self._orders_cache = cache
+            return result
+
+    def get_category_context(self, start="", end="", known_revision=""):
+        where, params = [], []
+        if start:
+            where.append("sold_date >= ?"); params.append(start)
+        if end:
+            where.append("sold_date <= ?"); params.append(end)
+        condition = " WHERE " + " AND ".join(where) if where else ""
+        with DB_LOCK:
+            con = connect()
+            try:
+                revision = read_data_revision(con)
+                if known_revision and known_revision == revision:
+                    return {"unchanged": True, "revision": revision}
+                cache = getattr(self, "_category_cache", {})
+                key = (revision, start, end)
+                if key in cache:
+                    return cache[key]
+                rows = con.execute("""
+                    WITH source AS (
+                      SELECT sold_date,item_no,description,type,amount,qty,
+                             ROW_NUMBER() OVER (ORDER BY sold_date,invoice,id) AS seq
+                      FROM sales""" + condition + """
+                    ), grouped_source AS (
+                      SELECT *, CASE WHEN LENGTH(sold_date)=10
+                        AND sold_date LIKE '____-__-__'
+                        AND SUBSTR(sold_date,6,2) BETWEEN '01' AND '12'
+                        AND SUBSTR(sold_date,9,2) BETWEEN '01' AND '31'
+                        THEN SUBSTR(sold_date,1,7) ELSE sold_date END AS date_bucket
+                      FROM source
+                    )
+                    SELECT MIN(sold_date),item_no,description,type,SUM(amount),SUM(qty),MIN(seq)
+                    FROM grouped_source
+                    GROUP BY date_bucket,item_no,description,type
+                    ORDER BY MIN(seq)
+                """, params).fetchall()
+            finally:
+                con.close()
+            result = {"sales": [{"soldDate": r[0] or "", "itemNo": r[1] or "", "description": r[2] or "",
+                                  "type": r[3] or "", "amount": r[4] or 0, "qty": r[5] or 0} for r in rows],
+                      "revision": revision}
+            if len(cache) >= 8:
+                cache = {}
+            cache[key] = result
+            self._category_cache = cache
+            return result
+
+    def get_customer_stats_context(self, start="", end="", known_revision=""):
+        """Compact history columns, retaining original row order and exact summation order."""
+        where, params = [], []
+        if start:
+            where.append("sold_date >= ?"); params.append(start)
+        if end:
+            where.append("sold_date <= ?"); params.append(end)
+        condition = " WHERE " + " AND ".join(where) if where else ""
+        with DB_LOCK:
+            con = connect()
+            try:
+                revision = read_data_revision(con)
+                if known_revision and known_revision == revision:
+                    return {"unchanged": True, "revision": revision}
+                key = (revision, start, end)
+                cached = getattr(self, "_customer_stats_cache", None)
+                if cached and cached[0] == key:
+                    return cached[1]
+                rows = con.execute("SELECT sold_date,invoice,cust_no,cust_name,rep1,rep2,type,amount,qty "
+                                   "FROM sales" + condition + " ORDER BY sold_date,invoice,id", params).fetchall()
+                reps = {"s1": [row_to_rep(r) for r in con.execute(
+                    "SELECT * FROM reps WHERE kind='s1' AND (deleted IS NULL OR deleted=0) ORDER BY code")], "s2": []}
+                customers = [row_to_customer(r) for r in con.execute("SELECT * FROM customers ORDER BY no")]
+            finally:
+                con.close()
+            fields = ["soldDate", "invoice", "custNo", "custName", "rep1", "rep2", "type", "amount", "qty"]
+            result = {"cols": fields, "rows": [[r[i] or (0 if i>=7 else "") for i in range(9)]
+                                                 for r in rows], "reps": reps, "customers": customers, "revision": revision}
+            self._customer_stats_cache = (key, result)
+            return result
+
+    def get_customer_reports_context(self, start="", end="", known_revision=""):
+        """Shared compact source for customer reports; preserve every original sales row."""
+        where, params = [], []
+        if start:
+            where.append("sold_date >= ?"); params.append(start)
+        if end:
+            where.append("sold_date <= ?"); params.append(end)
+        condition = " WHERE " + " AND ".join(where) if where else ""
+        with DB_LOCK:
+            con = connect()
+            try:
+                revision = read_data_revision(con)
+                if known_revision and known_revision == revision:
+                    return {"unchanged": True, "revision": revision}
+                key = (revision, start, end)
+                cached = getattr(self, "_customer_reports_cache", None)
+                if cached and cached[0] == key:
+                    return cached[1]
+                rows = con.execute("SELECT sold_date,invoice,cust_no,cust_name,rep1,rep2,amount "
+                                   "FROM sales" + condition + " ORDER BY sold_date,invoice,id", params).fetchall()
+                reps = {"s1": [row_to_rep(r) for r in con.execute(
+                    "SELECT * FROM reps WHERE kind='s1' AND (deleted IS NULL OR deleted=0) ORDER BY code")], "s2": []}
+                customers = [row_to_customer(r) for r in con.execute("SELECT * FROM customers ORDER BY no")]
+            finally:
+                con.close()
+            result = {"cols": ["soldDate","invoice","custNo","custName","rep1","rep2","amount"],
+                      "rows": [[r[i] or (0 if i==6 else "") for i in range(7)] for r in rows],
+                      "reps": reps, "customers": customers, "revision": revision}
+            self._customer_reports_cache = (key, result)
+            return result
+
+    def get_product_context(self, start="", end="", known_revision=""):
+        where, params = [], []
+        if start:
+            where.append("sold_date >= ?"); params.append(start)
+        if end:
+            where.append("sold_date <= ?"); params.append(end)
+        condition = " WHERE " + " AND ".join(where) if where else ""
+        with DB_LOCK:
+            con = connect()
+            try:
+                revision = read_data_revision(con)
+                if known_revision and known_revision == revision:
+                    return {"unchanged": True, "revision": revision}
+                key = (revision,start,end)
+                cached = getattr(self, "_product_context", None)
+                if cached and cached[0] == key:
+                    return cached[1]
+                rows = con.execute("SELECT sold_date,item_no,description,type,color,rep1,qty,amount FROM sales" +
+                                   condition + " ORDER BY sold_date,invoice,id",params).fetchall()
+                reps = {"s1": [row_to_rep(r) for r in con.execute(
+                    "SELECT * FROM reps WHERE kind='s1' AND (deleted IS NULL OR deleted=0) ORDER BY code")], "s2": []}
+                stock = [row_to_stock(r) for r in con.execute("SELECT * FROM stock ORDER BY item_no")]
+                result = {"cols": ["soldDate","itemNo","description","type","color","rep1","qty","amount"],
+                          "rows": [[r[i] or (0 if i>=6 else "") for i in range(8)] for r in rows],
+                          "reps": reps,"stock": stock,"revision":revision}
+                self._product_context = (key,result)
+                return result
+            finally:
+                con.close()
+
+    def get_product_types(self):
+        with DB_LOCK:
+            con = connect()
+            try:
+                return [r[0] for r in con.execute("SELECT DISTINCT type FROM sales WHERE type<>'' ORDER BY type")]
+            finally:
+                con.close()
+
+    def get_history_context(self, start="", end="", filters=None, known_revision=""):
+        """Lean history data; preserve original row order and JS report calculations."""
+        filters = filters if isinstance(filters, dict) else {}
+        where, params = [], []
+        if start:
+            where.append("sold_date >= ?"); params.append(start)
+        if end:
+            where.append("sold_date <= ?"); params.append(end)
+        condition = " WHERE " + " AND ".join(where) if where else ""
+        with DB_LOCK:
+            con = connect()
+            try:
+                revision = read_data_revision(con)
+                if known_revision and known_revision == revision:
+                    return {"unchanged": True, "revision": revision}
+                key = (revision, start, end)
+                cached = getattr(self, "_history_source", None)
+                if cached and cached[0] == key:
+                    sales, reps = cached[1], cached[2]
+                else:
+                    fields = ["soldDate", "invoice", "itemNo", "description", "color", "type",
+                              "custNo", "custName", "rep1", "rep2", "qty", "amount", "cost"]
+                    rows = con.execute("SELECT sold_date,invoice,item_no,description,color,type,"
+                        "cust_no,cust_name,rep1,rep2,qty,amount,cost FROM sales" + condition +
+                        " ORDER BY sold_date,invoice,id", params).fetchall()
+                    sales = [dict(zip(fields, [r[i] if r[i] is not None else (0 if i >= 10 else "")
+                                               for i in range(len(fields))])) for r in rows]
+                    reps = {"s1": [row_to_rep(r) for r in con.execute(
+                        "SELECT * FROM reps WHERE kind='s1' AND (deleted IS NULL OR deleted=0) ORDER BY code")], "s2": []}
+                    self._history_source = (key, sales, reps)
+            finally:
+                con.close()
+            # Use Unicode normalization equivalent to the report, including padded imported codes.
+            wanted = [(field, str(filters.get(option) or "").strip().upper()) for option, field in
+                      [("invoice", "invoice"), ("itemNo", "itemNo"), ("custNo", "custNo"), ("sales", "rep1")]]
+            wanted = [(field, value) for field, value in wanted if value]
+            selected = [r for r in sales if all(str(r[field] or "").strip().upper() == value
+                                               for field, value in wanted)] if wanted else sales
+            return {"sales": selected, "reps": reps, "revision": revision}
+
+    def get_stats_context(self, start="", end=""):
+        """返回报表所需的全部数据。走 HTTP+gzip，不再经过 pywebview 桥(原卡死根因)。"""
+        where, params = [], []
+        if start:
+            where.append("sold_date >= ?"); params.append(start)
+        if end:
+            where.append("sold_date <= ?"); params.append(end)
+        w = ("WHERE " + " AND ".join(where)) if where else ""
+        with DB_LOCK:
+            con = connect()
+            try:
+                sales = con.execute("SELECT * FROM sales " + w + " ORDER BY sold_date, invoice, id",
+                                    params).fetchall()
+                gm = get_reps_group_map(con)
+                reps_s1 = [row_to_rep(r) for r in
+                           con.execute("SELECT * FROM reps WHERE kind='s1' AND (deleted IS NULL OR deleted=0) ORDER BY code")]
+                reps_s2 = [row_to_rep(r) for r in
+                           con.execute("SELECT * FROM reps WHERE kind='s2' AND (deleted IS NULL OR deleted=0) ORDER BY code")]
+                stock = [row_to_stock(r) for r in con.execute("SELECT * FROM stock ORDER BY item_no")]
+                customers = [row_to_customer(r) for r in con.execute("SELECT * FROM customers ORDER BY no")]
+                revision = read_data_revision(con)
+            finally:
+                con.close()
+        return {
+            "sales": [enrich_sale(row_to_sale(r), gm) for r in sales],
+            "reps": {"s1": reps_s1, "s2": reps_s2},
+            "stock": stock,
+            "customers": customers,
+            "revision": revision,
+        }
+
+    def get_lookup_data(self):
+        with DB_LOCK:
+            con = connect()
+            try:
+                items = [r[0] for r in con.execute(
+                    "SELECT DISTINCT item_no FROM sales WHERE item_no<>'' ORDER BY item_no LIMIT 5000")]
+                customers = [{"no": r["no"], "name": r["name"]}
+                             for r in con.execute("SELECT no,name FROM customers ORDER BY no LIMIT 5000")]
+                invoices = [r[0] for r in con.execute(
+                    "SELECT DISTINCT invoice FROM sales WHERE invoice<>'' ORDER BY invoice DESC LIMIT 5000")]
+                types = [r[0] for r in con.execute(
+                    "SELECT DISTINCT type FROM sales WHERE type<>'' ORDER BY type")]
+                colors = [r[0] for r in con.execute(
+                    "SELECT DISTINCT color FROM sales WHERE color<>'' ORDER BY color")]
+                # 城市下拉（前端 fCity 模糊用 lk.cities）：之前漏返回，城市联想恒为空
+                cities = [r[0] for r in con.execute(
+                    "SELECT DISTINCT city FROM customers WHERE city<>'' ORDER BY city")]
+            finally:
+                con.close()
+        return {"items": items, "customers": customers, "invoices": invoices,
+                "types": types, "colors": colors, "cities": cities}
+
+    def search_invoices(self, q=""):
+        # 发票号模糊搜索走服务端：get_lookup_data 的发票列表 LIMIT 5000 会截掉老发票
+        q = (q or "").strip()
+        with DB_LOCK:
+            con = connect()
+            try:
+                like = "%" + q + "%"
+                rows = con.execute(
+                    "SELECT DISTINCT invoice FROM sales WHERE invoice LIKE ? ORDER BY invoice DESC LIMIT 20",
+                    (like,)).fetchall()
+            finally:
+                con.close()
+        return [r[0] for r in rows]
+
+    def search_descs(self, q=""):
+        # 描述模糊搜索走服务端：lookup 里没有描述数据
+        q = (q or "").strip()
+        with DB_LOCK:
+            con = connect()
+            try:
+                like = "%" + q + "%"
+                rows = con.execute(
+                    "SELECT DISTINCT description FROM sales WHERE description LIKE ? ORDER BY description LIMIT 20",
+                    (like,)).fetchall()
+            finally:
+                con.close()
+        return [r[0] for r in rows if r[0]]
+
+    # ---- 客户 ----
+    def get_all_customers(self, query=""):
+        q = (query or "").strip()
+        with DB_LOCK:
+            con = connect()
+            try:
+                if q:
+                    like = "%" + q + "%"
+                    rows = con.execute(
+                        "SELECT * FROM customers WHERE no LIKE ? OR name LIKE ? OR city LIKE ? ORDER BY no",
+                        (like, like, like)).fetchall()
+                else:
+                    rows = con.execute("SELECT * FROM customers ORDER BY no").fetchall()
+            finally:
+                con.close()
+        return [row_to_customer(r) for r in rows]
+
+    def upsert_customer(self, values_json):
+        v = json.loads(values_json) if isinstance(values_json, str) else (values_json or {})
+        no = (v.get("no") or "").strip()
+        if not no:
+            return {"ok": False, "error": "no required"}
+        with DB_LOCK:
+            con = connect()
+            try:
+                con.execute(
+                    """INSERT INTO customers (no,name,city,state,phone,contact,type,email,sales1,created_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(no) DO UPDATE SET
+                    name=excluded.name, city=excluded.city, state=excluded.state,
+                    phone=excluded.phone, contact=excluded.contact, type=excluded.type,
+                    email=excluded.email, sales1=excluded.sales1, created_at=excluded.created_at""",
+                    (no, v.get("name") or "", v.get("city") or "", v.get("state") or "",
+                     v.get("phone") or "", v.get("contact") or "", v.get("type") or "",
+                     v.get("email") or "", (v.get("sales1") or "").strip().upper(),
+                     v.get("created") or ""))
+                bump_data_revision(con)
+                con.commit()
+            finally:
+                con.close()
+        return {"ok": True}
+
+    def delete_customer(self, no):
+        with DB_LOCK:
+            con = connect()
+            try:
+                con.execute("DELETE FROM customers WHERE no=?", (no,))
+                bump_data_revision(con)
+                con.commit()
+            finally:
+                con.close()
+        return {"ok": True}
+
+    # ---- 库存 ----
+    def get_all_stock(self, query=""):
+        q = (query or "").strip()
+        with DB_LOCK:
+            con = connect()
+            try:
+                if q:
+                    like = "%" + q + "%"
+                    rows = con.execute(
+                        "SELECT * FROM stock WHERE item_no LIKE ? OR description LIKE ? ORDER BY item_no",
+                        (like, like)).fetchall()
+                else:
+                    rows = con.execute("SELECT * FROM stock ORDER BY item_no").fetchall()
+            finally:
+                con.close()
+        return [row_to_stock(r) for r in rows]
+
+    def upsert_stock(self, values_json):
+        v = json.loads(values_json) if isinstance(values_json, str) else (values_json or {})
+        item_no = (v.get("itemNo") or "").strip()
+        if not item_no:
+            return {"ok": False, "error": "itemNo required"}
+        with DB_LOCK:
+            con = connect()
+            try:
+                con.execute(
+                    """INSERT INTO stock (item_no,description,available,in_transit) VALUES (?,?,?,?)
+                    ON CONFLICT(item_no) DO UPDATE SET
+                    description=excluded.description, available=excluded.available,
+                    in_transit=excluded.in_transit""",
+                    (item_no, v.get("description") or "",
+                     _num(v.get("available")), _num(v.get("inTransit"))))
+                bump_data_revision(con)
+                con.commit()
+            finally:
+                con.close()
+        return {"ok": True}
+
+    def delete_stock(self, item_no):
+        with DB_LOCK:
+            con = connect()
+            try:
+                con.execute("DELETE FROM stock WHERE item_no=?", (item_no,))
+                bump_data_revision(con)
+                con.commit()
+            finally:
+                con.close()
+        return {"ok": True}
+
+    # ---- 销售员 ----
+    def get_all_reps(self):
+        with DB_LOCK:
+            con = connect()
+            try:
+                s1 = [row_to_rep(r) for r in con.execute(
+                    "SELECT * FROM reps WHERE kind='s1' AND (deleted IS NULL OR deleted=0) ORDER BY code")]
+                s2 = [row_to_rep(r) for r in con.execute(
+                    "SELECT * FROM reps WHERE kind='s2' AND (deleted IS NULL OR deleted=0) ORDER BY code")]
+                revision = read_data_revision(con)
+            finally:
+                con.close()
+        return {"s1": s1, "s2": s2, "revision": revision}
+
+    def upsert_rep(self, kind, values_json):
+        value = json.loads(values_json) if isinstance(values_json, str) else values_json
+        rep = normalize_rep(kind, value)
+        with DB_LOCK:
+            con = connect()
+            try:
+                write_rep(con, rep)
+                bump_data_revision(con)
+                con.commit()
+            finally:
+                con.close()
+        return {"ok": True}
+
+    def delete_rep(self, kind, code):
+        rep = normalize_rep(kind, {"code": code})
+        with DB_LOCK:
+            con = connect()
+            try:
+                old = con.execute("SELECT name,group_ FROM reps WHERE kind=? AND code=?", (kind, rep["code"])).fetchone()
+                if old:
+                    rep.update(name=old[0] or "", group=old[1] or "")
+                write_rep(con, rep, deleted=True)
+                bump_data_revision(con)
+                con.commit()
+            finally:
+                con.close()
+        return {"ok": True}
+
+    def save_rep_groups(self, changes_json, known_revision):
+        changes = json.loads(changes_json) if isinstance(changes_json, str) else changes_json
+        if not isinstance(changes, dict) or not isinstance(changes.get("upserts"), list) or not isinstance(changes.get("deletes"), list):
+            raise ValueError("销售分组保存格式错误")
+        upserts, deletes, seen = [], [], set()
+        for field, output in (("upserts", upserts), ("deletes", deletes)):
+            for value in changes[field]:
+                rep = normalize_rep(value.get("kind"), value)
+                key = (rep["kind"], rep["code"])
+                if key in seen:
+                    raise ValueError("销售编号重复: " + rep["code"])
+                seen.add(key)
+                output.append(rep)
+        with DB_LOCK:
+            con = connect()
+            try:
+                if not known_revision or known_revision != read_data_revision(con):
+                    return {"ok": False, "error": "GROUPS_CHANGED"}
+                for rep in deletes:
+                    old = con.execute("SELECT name,group_ FROM reps WHERE kind=? AND code=?", (rep["kind"], rep["code"])).fetchone()
+                    if old:
+                        rep.update(name=old[0] or "", group=old[1] or "")
+                    write_rep(con, rep, deleted=True)
+                for rep in upserts:
+                    write_rep(con, rep)
+                if upserts or deletes:
+                    bump_data_revision(con)
+                con.commit()
+                revision = read_data_revision(con)
+                reps = {kind: [row_to_rep(r) for r in con.execute("SELECT * FROM reps WHERE kind=? AND (deleted IS NULL OR deleted=0) ORDER BY code", (kind,))] for kind in ("s1", "s2")}
+                return {"ok": True, "reps": reps, "revision": revision}
+            finally:
+                con.close()
+
+    # ---- 主数据导入 ----
+    def apply_master_import(self, payload_json, replace_customers=False, replace_stock=False):
+        p = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
+        if replace_customers:
+            customers = p.get("customers")
+            if not isinstance(customers, list) or not customers or any(
+                not isinstance(c, dict) or not str(c.get("no") or "").strip()
+                for c in customers
+            ):
+                return {"ok": False, "error": "客户数据为空或格式异常，已保留原有客户。"}
+        with DB_LOCK:
+            con = connect()
+            try:
+                # 删除和写入在同一个事务内；写入失败时关闭连接会回滚。
+                if replace_customers:
+                    con.execute("DELETE FROM customers")
+                for c in (p.get("customers") or []):
+                    no = (c.get("no") or c.get("custNo") or "").strip()
+                    if not no:
+                        continue
+                    con.execute(
+                        """INSERT INTO customers (no,name,city,state,phone,contact,type,email,sales1,created_at)
+                        VALUES (?,?,?,?,?,?,?,?,?,?)
+                        ON CONFLICT(no) DO UPDATE SET
+                        name=excluded.name, city=excluded.city, state=excluded.state,
+                        phone=excluded.phone, contact=excluded.contact, type=excluded.type,
+                        email=excluded.email, sales1=excluded.sales1, created_at=excluded.created_at""",
+                        (no, c.get("name") or c.get("custName") or "", c.get("city") or "",
+                         c.get("state") or "", c.get("phone") or "", c.get("contact") or "",
+                         c.get("type") or "", c.get("email") or "",
+                         (c.get("sales1") or "").strip().upper(), c.get("created") or c.get("created_at") or ""))
+                if replace_stock:
+                    con.execute("DELETE FROM stock")
+                for s in (p.get("stock") or []):
+                    item_no = (s.get("itemNo") or s.get("item_no") or "").strip()
+                    if not item_no:
+                        continue
+                    con.execute(
+                        """INSERT INTO stock (item_no,description,available,in_transit) VALUES (?,?,?,?)
+                        ON CONFLICT(item_no) DO UPDATE SET
+                        description=excluded.description, available=excluded.available,
+                        in_transit=excluded.in_transit""",
+                        (item_no, s.get("description") or "",
+                         _num(s.get("available")), _num(s.get("inTransit") or s.get("in_transit"))))
+                # reps 两种形状都接受：同步路径传扁平列表 [{kind,code,...}]，
+                # 前端主数据导入/演示数据传 {s1:[...], s2:[...]}；字典形状先展平成列表
+                reps_in = p.get("reps") or []
+                if isinstance(reps_in, dict):
+                    flat = []
+                    for _kind in ("s1", "s2"):
+                        for _r in (reps_in.get(_kind) or []):
+                            _rr = dict(_r) if isinstance(_r, dict) else {}
+                            _rr.setdefault("kind", _kind)
+                            flat.append(_rr)
+                    reps_in = flat
+                for r in reps_in:
+                    kind = "s1" if (r.get("kind") or "s1") == "s1" else "s2"
+                    code = (r.get("code") or "").strip().upper()
+                    if not code:
+                        continue
+                    con.execute(
+                        """INSERT INTO reps (kind,code,name,group_,deleted) VALUES (?,?,?,?,0)
+                        ON CONFLICT(kind,code) DO NOTHING""",
+                        (kind, code, r.get("name") or "", r.get("group") or ""))
+                bump_data_revision(con)
+                con.commit()
+            finally:
+                con.close()
+        return {"ok": True}
+
+    def clear_all_data(self):
+        with DB_LOCK:
+            con = connect()
+            try:
+                for t in ("sales", "customers", "stock", "reps", "batches"):
+                    con.execute("DELETE FROM " + t)
+                bump_data_revision(con)
+                con.commit()
+            finally:
+                con.close()
+        return {"ok": True}
+
+    def initialize_data(self):
+        """初始化:补全销售2 / 补齐销售分组 / 刷新查询数据源。
+        与前端 initializeFlow 对齐，返回 {sales2Filled, newS1, newS2}（之前只返回 counts，初始化实际没做）。"""
+        init_db()
+        with DB_LOCK:
+            con = connect()
+            try:
+                counts = {t: con.execute("SELECT COUNT(*) FROM " + t).fetchone()[0]
+                          for t in ("sales", "customers", "stock", "reps", "batches")}
+                # 补销售2：rep2 为空且 rep1 有值时，rep2=rep1，并补 rep2_name
+                cur = con.execute(
+                    "UPDATE sales SET rep2=rep1, "
+                    "rep2_name=COALESCE(NULLIF(rep2_name,''), NULLIF(rep1_name,''), 'Ex Sales Rep') "
+                    "WHERE (rep2 IS NULL OR rep2='') AND rep1<>''")
+                filled = cur.rowcount or 0
+                # 补 rep2_name：rep2 有值但 rep2_name 为空时取 rep1_name，仍空则 'Ex Sales Rep'
+                con.execute(
+                    "UPDATE sales SET rep2_name=COALESCE(NULLIF(rep1_name,''), 'Ex Sales Rep') "
+                    "WHERE rep2<>'' AND (rep2_name IS NULL OR rep2_name='')")
+                # 补齐销售分组：销售记录里出现过的 code，reps 表没有则补入（后出现的同名覆盖先出现的，与 exe 逻辑一致）
+                have_s1 = {r[0] for r in con.execute("SELECT UPPER(code) FROM reps WHERE kind='s1'")}
+                have_s2 = {r[0] for r in con.execute("SELECT UPPER(code) FROM reps WHERE kind='s2'")}
+                uniq = {}
+                for code, name in con.execute(
+                        "SELECT rep1, rep1_name FROM sales WHERE rep1<>'' ORDER BY id"):
+                    uniq[code.strip().upper()] = (name or "").strip() or code.strip().upper()
+                for code, name in con.execute(
+                        "SELECT rep2, rep2_name FROM sales WHERE rep2<>'' ORDER BY id"):
+                    uniq[code.strip().upper()] = (name or "").strip() or code.strip().upper()
+                new_s1, new_s2 = [], []
+                for code in sorted(uniq):
+                    if code not in have_s1:
+                        con.execute("INSERT OR IGNORE INTO reps (kind,code,name,group_) VALUES ('s1',?,?,?)",
+                                    (code, uniq[code], ""))
+                        new_s1.append(code)
+                    if code not in have_s2:
+                        con.execute("INSERT OR IGNORE INTO reps (kind,code,name,group_) VALUES ('s2',?,?,?)",
+                                    (code, uniq[code], ""))
+                        new_s2.append(code)
+                bump_data_revision(con)
+                con.commit()
+            finally:
+                con.close()
+        return {"ok": True, "sales2Filled": filled, "newS1": new_s1, "newS2": new_s2,
+                "counts": counts}
+
+    # 每类报表保留最新快照；存于现有 prefs 表，随数据库备份一同保留。
+    def _report_revision(self):
+        con = connect()
+        try:
+            return read_data_revision(con)
+        finally:
+            con.close()
+
+    def get_report_revision(self):
+        with DB_LOCK:
+            return self._report_revision()
+
+    def save_report(self, report_id, spec, options, revision):
+        if not re.fullmatch(r"[A-Za-z0-9_]{1,60}", report_id or ""):
+            raise ValueError("Invalid report id")
+        if not isinstance(spec, dict) or not isinstance(spec.get("values"), list):
+            raise ValueError("Invalid report result")
+        with DB_LOCK:
+            con = connect()
+            try:
+                stale = revision != read_data_revision(con)
+                record = {"spec": spec, "options": options, "revision": revision}
+                con.execute("INSERT INTO bcs_prefs(key,value) VALUES (?,?) "
+                            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                            ("report:" + report_id, json.dumps(json.dumps(record, ensure_ascii=False), ensure_ascii=False)))
+                con.commit()
+            finally:
+                con.close()
+        return {"ok": True, "stale": stale}
+
+    def load_report(self, report_id):
+        if not re.fullmatch(r"[A-Za-z0-9_]{1,60}", report_id or ""):
+            raise ValueError("Invalid report id")
+        with DB_LOCK:
+            con = connect()
+            try:
+                row = con.execute("SELECT value FROM bcs_prefs WHERE key=?", ("report:" + report_id,)).fetchone()
+                record = json.loads(json.loads(row[0])) if row else None
+                if record:
+                    record["spec"]["stale"] = record.get("revision") != read_data_revision(con)
+            finally:
+                con.close()
+        return {"ok": True, "report": record}
+
+    def load_reports(self):
+        with DB_LOCK:
+            revision = self._report_revision()
+            reports = {}
+            for key, value in prefs_load(include_reports=True).items():
+                if not key.startswith("report:"):
+                    continue
+                try:
+                    record = json.loads(value)
+                    record["spec"]["stale"] = record.get("revision") != revision
+                    reports[key[7:]] = record
+                except (ValueError, TypeError, KeyError):
+                    continue
+        return {"ok": True, "reports": reports}
+
+    # ---- meta / prefs ----
+    def get_meta(self):
+        with DB_LOCK:
+            con = connect()
+            try:
+                cols = [d[0] for d in con.execute("SELECT * FROM meta LIMIT 1").description or []]
+                if "key" in cols:
+                    rows = con.execute("SELECT key, value FROM meta").fetchall()
+                    meta = {r[0]: r[1] for r in rows}
+                else:
+                    rows = con.execute("SELECT k, v FROM meta").fetchall()
+                    meta = {r[0]: r[1] for r in rows}
+            finally:
+                con.close()
+        prefs = prefs_load()
+        # 前端 set_pref 存到 prefs.json;旧版 meta 表里的设置也合并进来
+        # 前端启动时从 meta.prefs 恢复界面设置(行高列宽等)
+        for k in ("sheetLayouts", "userStyles", "navCollapsed", "sidebarCollapsed"):
+            if k in meta and k not in prefs:
+                prefs[k] = meta[k]
+        meta["prefs"] = {k: v for k, v in prefs.items() if not k.startswith("report:") and k != "masterDailySync"}
+        # lang 放顶层(前端直接读 meta.lang)
+        if "lang" in prefs:
+            meta["lang"] = prefs["lang"]
+        elif "lang" in meta:
+            meta["lang"] = meta["lang"]
+        return meta
+
+    def set_pref(self, key, value):
+        if key in ("localRepOverrides", "masterDailySync"):
+            raise ValueError("保留内部设置，不允许直接修改")
+        pref_set(key, value)
+        return {"ok": True}
+
+    def set_lang(self, lang):
+        pref_set("lang", lang)
+        return {"ok": True}
+
+    def close_app(self):
+        # 网页版由浏览器关闭页面；接口保留兼容（exe 版真正退出），前端退出时调用
+        return {"ok": True}
+
+    # ---- 备份 ----
+    def backup_inspect(self):
+        with DB_LOCK:
+            con = connect()
+            try:
+                counts = {t: con.execute("SELECT COUNT(*) FROM " + t).fetchone()[0]
+                          for t in ("sales", "customers", "stock", "reps", "batches")}
+            finally:
+                con.close()
+        if DATABASE_URL:
+            return {"ok": True, "counts": counts, "size": 0, "mtime": "", "storage": "PostgreSQL"}
+        size = os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else 0
+        return {"ok": True, "counts": counts, "size": size,
+                "mtime": time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(DB_PATH)))
+                if os.path.exists(DB_PATH) else ""}
+
+    def backup_restore(self, payload_json):
+        # 网页版走 /api/backup_upload 直接传文件;此接口保留兼容
+        return {"ok": False, "error": "请使用备份上传功能"}
+
+    def _fetch_quote_sheet(self, sheet):
+        """拉取报价工具共享文档指定工作表的 {headers, rows}（合并接口）。成功返回 (data, None)，失败返回 (None, error)。"""
+        base = QUOTE_PULL_API_URL.split("?")[0]
+        url = base + "?sheet=" + urllib.parse.quote(sheet)
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "BCS-Sync/1.0"})
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                raw = resp.read()
+        except Exception as e:
+            return None, "拉取报价 %s 失败: %s: %s" % (sheet, type(e).__name__, e)
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except Exception as e:
+            return None, "报价 %s JSON 解析失败: %s" % (sheet, e)
+        if not data.get("ok"):
+            return None, "报价 %s 接口返回失败: %s" % (sheet, data.get("error") or "")
+        return data, None
+
+    @staticmethod
+    def _cell(r, i):
+        try:
+            v = r[i]
+        except Exception:
+            return ""
+        return "" if v is None else str(v)
+
+    @staticmethod
+    def _clean_date(v):
+        # 统一成 YYYY-MM-DD：ISO（含时间后缀）取日期部分；美式 M/D/YYYY 转 ISO；无法解析的原样返回
+        s = (v or "").strip()
+        if not s:
+            return s
+        for fmt, txt in (("%Y-%m-%d", s[:10]), ("%m/%d/%Y", s)):
+            try:
+                return datetime.strptime(txt, fmt).strftime("%Y-%m-%d")
+            except Exception:
+                continue
+        return s
+
+    def sync_master_from_sheets(self, scope='all'):
+        if not MASTER_SYNC_LOCK.acquire(blocking=False):
+            return {"ok": False, "busy": True, "error": "客户/库存正在同步，请稍后再试。"}
+        try:
+            return self._sync_master_from_sheets_locked(scope)
+        finally:
+            MASTER_SYNC_LOCK.release()
+
+    def get_auto_sync_status(self):
+        from auto_sync import get_status
+        return get_status(sys.modules[__name__])
+
+    def _sync_master_from_sheets_locked(self, scope='all'):
+        """仅从报价共享文档读取 Customer / Pull；不读取销售表，不修改业务员分组。"""
+        scope = (scope or 'all').strip().lower()
+        if scope not in ('all', 'customers', 'stock'):
+            return {"ok": False, "error": "无效的同步范围"}
+        payload = {"customers": [], "stock": [], "reps": []}
+        # --- Customer（报价工具共享文档的 Customer 页签）---
+        # 报价 Customer 列：No.=0, Name=1, City=3, State=4, Salesperson Code=7,
+        # Phone No.=10, Cell Phone No.=11, Contact=12, Creation Date=13, Customer Type=16, E-Mail=17
+        if scope in ('all', 'customers'):
+            data, err = self._fetch_quote_sheet("Customer")
+            if err:
+                return {"ok": False, "error": err}
+            rows = data.get("rows")
+            if not isinstance(rows, list) or not rows:
+                return {"ok": False, "error": "Customer 返回空表或格式异常，已保留原有客户。"}
+            for r in rows:
+                if not isinstance(r, list) or len(r) < 18:
+                    return {"ok": False, "error": "Customer 列数或格式异常，已保留原有客户。"}
+                no = self._cell(r, 0).strip()
+                if not no:
+                    continue
+                phone = self._cell(r, 10).strip() or self._cell(r, 11).strip()
+                payload["customers"].append({
+                    "no": no, "name": self._cell(r, 1),
+                    "city": self._cell(r, 3), "state": self._cell(r, 4),
+                    "phone": phone, "contact": self._cell(r, 12),
+                    "type": self._cell(r, 16), "email": self._cell(r, 17),
+                    "sales1": self._cell(r, 7), "created": self._clean_date(self._cell(r, 13)),
+                })
+        # --- 石材库存：报价工具共享文档的 Pull，SL* 行，只进有库存的 ---
+        if scope in ('all', 'stock'):
+            data, err = self._fetch_quote_sheet("Pull")
+            if err:
+                return {"ok": False, "error": err}
+            rows = data.get("rows")
+            if not isinstance(rows, list) or not rows:
+                return {"ok": False, "error": "Pull 返回空表或格式异常，已保留原有库存。"}
+            stone_rows = 0
+            for r in rows:
+                if not isinstance(r, list) or len(r) < 6:
+                    return {"ok": False, "error": "Pull 列数或格式异常，已保留原有库存。"}
+                item_no = self._cell(r, 0).strip()
+                if not item_no or not item_no.upper().startswith("SL"):
+                    continue
+                stone_rows += 1
+                available = _num(r[4] if len(r) > 4 else "")
+                in_transit = _num(r[5] if len(r) > 5 else "")
+                if available <= 0 and in_transit <= 0:
+                    continue  # 无库存的行不进
+                payload["stock"].append({
+                    "itemNo": item_no, "description": self._cell(r, 1),
+                    "available": available, "inTransit": in_transit,
+                })
+            if not stone_rows:
+                return {"ok": False, "error": "Pull 中没有有效石材行，已保留原有客户和库存。"}
+        # Compare under the same lock used for writes. Unchanged snapshots must
+        # preserve the revision and report caches instead of forcing recalculation.
+        with DB_LOCK:
+            con = connect()
+            try:
+                unchanged = True
+                if scope in ('all', 'customers'):
+                    current = {r["no"]: row_to_customer(r) for r in con.execute("SELECT * FROM customers")}
+                    incoming = {r["no"]: r for r in payload["customers"]}
+                    unchanged = unchanged and current == incoming
+                if scope in ('all', 'stock'):
+                    current = {r["item_no"]: row_to_stock(r) for r in con.execute("SELECT * FROM stock")}
+                    incoming = {r["itemNo"]: r for r in payload["stock"]}
+                    unchanged = unchanged and current == incoming
+            finally:
+                con.close()
+            if unchanged:
+                res = {"ok": True}
+            else:
+                res = self.apply_master_import(payload,
+                    replace_customers=scope in ('all', 'customers'),
+                    replace_stock=scope in ('all', 'stock'))
+        if not res.get("ok"):
+            return {"ok": False, "error": "主数据导入失败: %s" % res.get("error")}
+        return {"ok": True, "changed": not unchanged,
+                "customers": len(payload["customers"]),
+                "stock": len(payload["stock"]), "reps": 0}
+
+
+
+def _num(v):
+    try:
+        if v is None or v == "":
+            return 0
+        if isinstance(v, str):
+            v = v.replace(",", "").replace("$", "").strip()
+            if v.startswith("(") and v.endswith(")"):
+                v = "-" + v[1:-1]
+        return float(v)
+    except Exception:
+        return 0
+
+
+API = Api()
+API_METHODS = {name: getattr(API, name) for name in dir(API) if not name.startswith("_")}
+
+
+# ================= HTTP =================
+
+MIME = {
+    ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8",
+    ".png": "image/png", ".jpg": "image/jpeg", ".svg": "image/svg+xml",
+    ".woff": "font/woff", ".woff2": "font/woff2", ".ttf": "font/ttf",
+    ".ico": "image/x-icon", ".map": "application/json",
+}
+
+
+# Cost access is independent of business data and is never stored in backups.
+import secrets
+import hmac
+COST_SESSIONS = {}
+COST_ATTEMPTS = {}
+COST_AUTH_LOCK = threading.RLock()
+COST_TTL = 1800
+
+def cost_token_valid(token):
+    with COST_AUTH_LOCK:
+        now = time.time()
+        for key, expires in list(COST_SESSIONS.items()):
+            if expires <= now:
+                COST_SESSIONS.pop(key, None)
+        return bool(token and token in COST_SESSIONS)
+
+def redact_cost(value):
+    if isinstance(value, dict):
+        result = {k: redact_cost(v) for k, v in value.items()
+                  if 'cost' not in k.lower() and '成本' not in k}
+        # Saved report matrices can contain cost as a positional column.
+        rows = value.get('values')
+        if isinstance(rows, list) and rows and isinstance(rows[0], list):
+            columns = [i for i, h in enumerate(rows[0])
+                       if str(h).strip().lower() in ('cost', '成本')]
+            if columns:
+                result['values'] = [[v for i, v in enumerate(row) if i not in columns]
+                                    for row in rows]
+        return result
+    if isinstance(value, list):
+        return [redact_cost(v) for v in value]
+    if isinstance(value, str) and value[:1] in ('{', '[', '"'):
+        try:
+            parsed = json.loads(value)
+            if parsed != value:
+                return json.dumps(redact_cost(parsed), ensure_ascii=False)
+        except (ValueError, TypeError):
+            pass
+    return value
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "BCSLocal/1.0"
+
+    def log_message(self, fmt, *args):
+        sys.stderr.write("[%s] %s\n" % (time.strftime("%H:%M:%S"), fmt % args))
+
+    def _send(self, body: bytes, ctype="application/json; charset=utf-8", status=200, gzip_ok=True):
+        accept = self.headers.get("Accept-Encoding", "")
+        if gzip_ok and len(body) > 102400 and "gzip" in accept:
+            body = gzip.compress(body, compresslevel=6)
+            self.send_response(status)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Cost-Unlocked", "1" if self._cost_allowed() else "0")
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(status)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Cost-Unlocked", "1" if self._cost_allowed() else "0")
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    def _cost_allowed(self):
+        return cost_token_valid(self.headers.get('X-Cost-Token', ''))
+
+    def _json(self, obj, status=200):
+        self._send(json.dumps(obj, ensure_ascii=False).encode("utf-8"), status=status)
+
+    def do_GET(self):
+        path = urllib.parse.urlparse(self.path).path
+        if path == "/api/backup_download":
+            return self._backup_download()
+        if path in ("/", "/index.html"):
+            return self._static("index.html")
+        # 静态文件
+        rel = urllib.parse.unquote(path.lstrip("/"))
+        safe = os.path.normpath(os.path.join(UI_DIR, rel))
+        if not safe.startswith(UI_DIR) or not os.path.isfile(safe):
+            self._json({"error": "not found"}, 404)
+            return
+        self._static_rel(safe)
+
+    def _static(self, name):
+        self._static_rel(os.path.join(UI_DIR, name))
+
+    def _static_rel(self, full):
+        ext = os.path.splitext(full)[1].lower()
+        ctype = MIME.get(ext, "application/octet-stream")
+        try:
+            with open(full, "rb") as f:
+                body = f.read()
+        except OSError:
+            self._json({"error": "not found"}, 404)
+            return
+        self._send(body, ctype)
+
+    def _backup_download(self):
+        if not self._cost_allowed():
+            return self._json({"error": "COST_LOCKED"}, 403)
+        try:
+            body = export_backup_bytes()
+        except Exception:
+            self._json({"ok": False, "error": "备份导出失败，请检查数据库连接。"}, 500)
+            return
+        fname = "bcs_backup_%s.db" % time.strftime("%Y%m%d_%H%M%S")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Disposition", "attachment; filename=%s" % fname)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        path = urllib.parse.urlparse(self.path).path
+        if path == "/api/backup_upload":
+            return self._backup_upload()
+        if not path.startswith("/api/"):
+            self._json({"error": "not found"}, 404)
+            return
+        method = path[len("/api/"):]
+        fn = API_METHODS.get(method)
+        if not fn and method not in ("unlock_cost", "cost_status"):
+            self._json({"error": "unknown method: " + method}, 404)
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        raw = self.rfile.read(length) if length else b""
+        try:
+            payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            payload = {}
+        args = payload.get("args", [])
+        if method in ('get_meta', 'query_sales') or (method.startswith('get_') and method != 'get_auto_sync_status'):
+            from auto_sync import maybe_start
+            maybe_start(sys.modules[__name__])
+        if method == 'cost_status':
+            return self._json({'unlocked': self._cost_allowed()})
+        if method == 'unlock_cost':
+            password = os.environ.get('COST_VIEW_PASSWORD', '')
+            if not password:
+                return self._json({'error': 'COST_PASSWORD_NOT_CONFIGURED'}, 503)
+            ip = self.client_address[0]
+            with COST_AUTH_LOCK:
+                now = time.time()
+                attempts = [t for t in COST_ATTEMPTS.get(ip, []) if t > now - 60]
+                COST_ATTEMPTS[ip] = attempts
+                if len(attempts) >= 5:
+                    return self._json({'error': 'TOO_MANY_ATTEMPTS'}, 429)
+                supplied = str(args[0]) if args else ''
+                if not hmac.compare_digest(supplied.encode(), password.encode()):
+                    attempts.append(now)
+                    return self._json({'error': 'WRONG_PASSWORD'}, 403)
+                token = secrets.token_urlsafe(32)
+                COST_SESSIONS[token] = now + COST_TTL
+                COST_ATTEMPTS.pop(ip, None)
+            return self._json({'ok': True, 'token': token, 'expiresIn': COST_TTL})
+        allowed = self._cost_allowed()
+        management_methods = {
+            'update_sale', 'apply_sales_import', 'delete_batch', 'list_batches',
+            'upsert_customer', 'delete_customer', 'upsert_stock', 'delete_stock',
+            'upsert_rep', 'delete_rep', 'save_rep_groups', 'apply_master_import', 'clear_all_data',
+            'initialize_data', 'sync_master_from_sheets', 'backup_restore', 'backup_inspect'
+        }
+        if method in management_methods and not allowed:
+            return self._json({'error': 'MANAGEMENT_LOCKED'}, 403)
+        # History contains privilege-dependent columns. Recompute it from filtered
+        # data instead of sharing one saved result between locked/unlocked views.
+        if method == 'load_report' and args and args[0] == 'salesHistory':
+            return self._json({'ok': True, 'report': None})
+        if method == 'save_report' and args and args[0] == 'salesHistory':
+            return self._json({'ok': True})
+        try:
+            result = fn(*args)
+        except TypeError as e:
+            self._json({"error": "bad args: %s" % e}, 400)
+            return
+        except Exception as e:
+            self._json({"error": "%s: %s" % (type(e).__name__, e)}, 500)
+            return
+        # 兼容前端:python 侧返回 JSON 字符串时自动解析 —— 我们直接返回对象即可
+        if method == 'load_reports' and isinstance(result, dict):
+            result.get('reports', {}).pop('salesHistory', None)
+        self._json((result if allowed else redact_cost(result)) if result is not None else {"ok": True})
+
+    def _backup_upload(self):
+        if not self._cost_allowed():
+            return self._json({"error": "COST_LOCKED"}, 403)
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b""
+        if len(raw) < 100 or not raw.startswith(b"SQLite format 3\x00"):
+            self._json({"ok": False, "error": "不是有效的 SQLite 数据库文件"})
+            return
+        try:
+            restore_backup_bytes(raw)
+        except Exception as e:
+            self._json({"ok": False, "error": "备份恢复失败，原数据未改动: " + str(e)}, 400)
+            return
+        self._json({"ok": True})
+
+
+BACKUP_TABLES = ("sales", "customers", "stock", "reps", "batches", "meta", "bcs_prefs")
+
+
+def export_backup_bytes():
+    with tempfile.TemporaryDirectory() as td, DB_LOCK:
+        path = os.path.join(td, "backup.db")
+        out = sqlite3.connect(path)
+        src = connect()
+        try:
+            out.executescript(SCHEMA)
+            if DATABASE_URL:
+                src.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            for table in BACKUP_TABLES:
+                cursor = src.execute("SELECT * FROM " + table)
+                cols = [d[0] for d in cursor.description]
+                sql = 'INSERT INTO ' + table + ' (' + ','.join('"'+c+'"' for c in cols) + ') VALUES (' + ','.join('?' for c in cols) + ')'
+                while True:
+                    rows = cursor.fetchmany(1000)
+                    if not rows:
+                        break
+                    out.executemany(sql, [tuple(r) for r in rows])
+            out.commit()
+        finally:
+            src.close()
+            out.close()
+        with open(path, "rb") as f:
+            return f.read()
+
+
+def restore_backup_bytes(raw):
+    # Validate a separate file completely before touching live data. Restores are atomic.
+    with tempfile.TemporaryDirectory() as td, DB_LOCK:
+        path = os.path.join(td, "incoming.db")
+        with open(path, "wb") as f:
+            f.write(raw)
+        source = sqlite3.connect(path)
+        expected = sqlite3.connect(":memory:")
+        dest = None
+        try:
+            source.execute("PRAGMA trusted_schema=OFF")
+            if source.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise ValueError("数据库完整性检查未通过")
+            expected.executescript(SCHEMA)
+            tables = {r[0] for r in source.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            columns = {}
+            for table in BACKUP_TABLES:
+                if table == "bcs_prefs" and table not in tables:
+                    continue  # old backups did not contain UI preferences
+                if table not in tables:
+                    raise ValueError("缺少数据表: " + table)
+                cols = [r[1] for r in expected.execute("PRAGMA table_info(" + table + ")")]
+                actual = [r[1] for r in source.execute("PRAGMA table_info(" + table + ")")]
+                if not set(cols).issubset(actual):
+                    raise ValueError("数据表结构不兼容: " + table)
+                columns[table] = cols
+            dest = connect()
+            for table, cols in columns.items():
+                dest.execute("DELETE FROM " + table)
+                names = ','.join('"'+c+'"' for c in cols)
+                insert = 'INSERT INTO ' + table + ' (' + names + ') VALUES (' + ','.join('?' for c in cols) + ')'
+                cursor = source.execute('SELECT ' + names + ' FROM ' + table)
+                while True:
+                    rows = cursor.fetchmany(1000)
+                    if not rows:
+                        break
+                    dest.executemany(insert, rows)
+            bump_data_revision(dest)
+            dest.commit()
+        finally:
+            if dest is not None:
+                dest.close()  # rollback if any error occurred before commit
+            source.close()
+            expected.close()
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", 18789)))
+    ap.add_argument("--no-browser", action="store_true")
+    args = ap.parse_args()
+
+    init_db()
+    migrate_local_prefs()
+    srv = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
+    url = "http://0.0.0.0:%d/" % args.port
+    print("=" * 60)
+    print("BCS 销售统计单机版已启动")
+    print("访问地址: %s" % url)
+    print("数据库:   %s" % ("PostgreSQL（外部持久存储）" if DATABASE_URL else DB_PATH))
+    print("=" * 60)
+    if not args.no_browser:
+        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+    from auto_sync import start_worker
+    worker = start_worker(sys.modules[__name__])
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\n已退出")
+    finally:
+        if worker:
+            worker.stop()
+        srv.server_close()
+
+
+if __name__ == "__main__":
+    main()
