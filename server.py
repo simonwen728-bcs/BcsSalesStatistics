@@ -119,6 +119,32 @@ def row_to_rep(r):
     }
 
 
+
+def normalize_rep(kind, value):
+    if kind not in ("s1", "s2") or not isinstance(value, dict):
+        raise ValueError("销售员类型或数据格式错误")
+    code = str(value.get("code") or "").strip().upper()
+    if not code or len(code) > 64 or any(c.isspace() or ord(c) < 32 for c in code):
+        raise ValueError("销售编号不能为空，也不能包含空格")
+    name = str(value.get("name") or "").strip()
+    group = str(value.get("group") or "").strip()
+    allowed = {"": "", "house": "House", "outside": "OutSide", "other branch": "Other Branch", "ic": "IC"} if kind == "s1" else {"": "", "inside": "inside"}
+    if group.lower() not in allowed:
+        raise ValueError("销售分组无效: " + group)
+    return {"kind": kind, "code": code, "name": name, "group": allowed[group.lower()]}
+
+
+def write_rep(con, rep, deleted=False):
+    con.execute("""INSERT INTO reps(kind,code,name,group_,locked,deleted) VALUES (?,?,?,?,1,?)
+        ON CONFLICT(kind,code) DO UPDATE SET name=excluded.name,group_=excluded.group_,locked=1,deleted=excluded.deleted""",
+        (rep["kind"], rep["code"], rep["name"], rep["group"], int(deleted)))
+    if os.environ.get("BCS_LOCAL_DESKTOP") == "1":
+        row = con.execute("SELECT value FROM bcs_prefs WHERE key='localRepOverrides'").fetchone()
+        overrides = json.loads(row[0]) if row else {}
+        overrides[rep["kind"] + ":" + rep["code"]] = dict(rep, deleted=bool(deleted))
+        con.execute("INSERT INTO bcs_prefs(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    ("localRepOverrides", json.dumps(overrides, ensure_ascii=False)))
+
 def get_reps_group_map(con):
     """rep1 code(大写) -> group(大写)，用于销售行的 code/group 富化。"""
     m = {}
@@ -901,24 +927,18 @@ class Api:
                     "SELECT * FROM reps WHERE kind='s1' AND (deleted IS NULL OR deleted=0) ORDER BY code")]
                 s2 = [row_to_rep(r) for r in con.execute(
                     "SELECT * FROM reps WHERE kind='s2' AND (deleted IS NULL OR deleted=0) ORDER BY code")]
+                revision = read_data_revision(con)
             finally:
                 con.close()
-        return {"s1": s1, "s2": s2}
+        return {"s1": s1, "s2": s2, "revision": revision}
 
     def upsert_rep(self, kind, values_json):
-        v = json.loads(values_json) if isinstance(values_json, str) else (values_json or {})
-        kind = "s1" if kind == "s1" else "s2"
-        code = (v.get("code") or "").strip().upper()
-        if not code:
-            return {"ok": False, "error": "code required"}
+        value = json.loads(values_json) if isinstance(values_json, str) else values_json
+        rep = normalize_rep(kind, value)
         with DB_LOCK:
             con = connect()
             try:
-                con.execute(
-                    """INSERT INTO reps (kind,code,name,group_,deleted) VALUES (?,?,?,?,0)
-                    ON CONFLICT(kind,code) DO UPDATE SET
-                    name=excluded.name, group_=excluded.group_, deleted=0""",
-                    (kind, code, v.get("name") or "", v.get("group") or ""))
+                write_rep(con, rep)
                 bump_data_revision(con)
                 con.commit()
             finally:
@@ -926,15 +946,53 @@ class Api:
         return {"ok": True}
 
     def delete_rep(self, kind, code):
+        rep = normalize_rep(kind, {"code": code})
         with DB_LOCK:
             con = connect()
             try:
-                con.execute("UPDATE reps SET deleted=1 WHERE kind=? AND code=?", (kind, code))
+                old = con.execute("SELECT name,group_ FROM reps WHERE kind=? AND code=?", (kind, rep["code"])).fetchone()
+                if old:
+                    rep.update(name=old[0] or "", group=old[1] or "")
+                write_rep(con, rep, deleted=True)
                 bump_data_revision(con)
                 con.commit()
             finally:
                 con.close()
         return {"ok": True}
+
+    def save_rep_groups(self, changes_json, known_revision):
+        changes = json.loads(changes_json) if isinstance(changes_json, str) else changes_json
+        if not isinstance(changes, dict) or not isinstance(changes.get("upserts"), list) or not isinstance(changes.get("deletes"), list):
+            raise ValueError("销售分组保存格式错误")
+        upserts, deletes, seen = [], [], set()
+        for field, output in (("upserts", upserts), ("deletes", deletes)):
+            for value in changes[field]:
+                rep = normalize_rep(value.get("kind"), value)
+                key = (rep["kind"], rep["code"])
+                if key in seen:
+                    raise ValueError("销售编号重复: " + rep["code"])
+                seen.add(key)
+                output.append(rep)
+        with DB_LOCK:
+            con = connect()
+            try:
+                if not known_revision or known_revision != read_data_revision(con):
+                    return {"ok": False, "error": "GROUPS_CHANGED"}
+                for rep in deletes:
+                    old = con.execute("SELECT name,group_ FROM reps WHERE kind=? AND code=?", (rep["kind"], rep["code"])).fetchone()
+                    if old:
+                        rep.update(name=old[0] or "", group=old[1] or "")
+                    write_rep(con, rep, deleted=True)
+                for rep in upserts:
+                    write_rep(con, rep)
+                if upserts or deletes:
+                    bump_data_revision(con)
+                con.commit()
+                revision = read_data_revision(con)
+                reps = {kind: [row_to_rep(r) for r in con.execute("SELECT * FROM reps WHERE kind=? AND (deleted IS NULL OR deleted=0) ORDER BY code", (kind,))] for kind in ("s1", "s2")}
+                return {"ok": True, "reps": reps, "revision": revision}
+            finally:
+                con.close()
 
     # ---- 主数据导入 ----
     def apply_master_import(self, payload_json, replace_customers=False, replace_stock=False):
@@ -998,8 +1056,7 @@ class Api:
                         continue
                     con.execute(
                         """INSERT INTO reps (kind,code,name,group_,deleted) VALUES (?,?,?,?,0)
-                        ON CONFLICT(kind,code) DO UPDATE SET
-                        name=excluded.name, group_=excluded.group_, deleted=0""",
+                        ON CONFLICT(kind,code) DO NOTHING""",
                         (kind, code, r.get("name") or "", r.get("group") or ""))
                 bump_data_revision(con)
                 con.commit()
@@ -1153,6 +1210,8 @@ class Api:
         return meta
 
     def set_pref(self, key, value):
+        if key == "localRepOverrides":
+            raise ValueError("保留内部设置，不允许直接修改")
         pref_set(key, value)
         return {"ok": True}
 
@@ -1476,7 +1535,7 @@ class Handler(BaseHTTPRequestHandler):
         management_methods = {
             'update_sale', 'apply_sales_import', 'delete_batch', 'list_batches',
             'upsert_customer', 'delete_customer', 'upsert_stock', 'delete_stock',
-            'upsert_rep', 'delete_rep', 'apply_master_import', 'clear_all_data',
+            'upsert_rep', 'delete_rep', 'save_rep_groups', 'apply_master_import', 'clear_all_data',
             'initialize_data', 'sync_master_from_sheets', 'backup_restore', 'backup_inspect'
         }
         if method in management_methods and not allowed:
