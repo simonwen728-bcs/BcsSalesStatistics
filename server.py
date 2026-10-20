@@ -44,6 +44,7 @@ UI_DIR = os.path.join(BASE_DIR, "ui")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
+MASTER_SYNC_LOCK = threading.Lock()
 DB_LOCK = threading.RLock()
 PREFS_LOCK = threading.RLock()
 
@@ -1201,7 +1202,7 @@ class Api:
         for k in ("sheetLayouts", "userStyles", "navCollapsed", "sidebarCollapsed"):
             if k in meta and k not in prefs:
                 prefs[k] = meta[k]
-        meta["prefs"] = {k: v for k, v in prefs.items() if not k.startswith("report:")}
+        meta["prefs"] = {k: v for k, v in prefs.items() if not k.startswith("report:") and k != "masterDailySync"}
         # lang 放顶层(前端直接读 meta.lang)
         if "lang" in prefs:
             meta["lang"] = prefs["lang"]
@@ -1210,7 +1211,7 @@ class Api:
         return meta
 
     def set_pref(self, key, value):
-        if key == "localRepOverrides":
+        if key in ("localRepOverrides", "masterDailySync"):
             raise ValueError("保留内部设置，不允许直接修改")
         pref_set(key, value)
         return {"ok": True}
@@ -1283,8 +1284,22 @@ class Api:
         return s
 
     def sync_master_from_sheets(self, scope='all'):
+        if not MASTER_SYNC_LOCK.acquire(blocking=False):
+            return {"ok": False, "busy": True, "error": "客户/库存正在同步，请稍后再试。"}
+        try:
+            return self._sync_master_from_sheets_locked(scope)
+        finally:
+            MASTER_SYNC_LOCK.release()
+
+    def get_auto_sync_status(self):
+        from auto_sync import get_status
+        return get_status(sys.modules[__name__])
+
+    def _sync_master_from_sheets_locked(self, scope='all'):
         """仅从报价共享文档读取 Customer / Pull；不读取销售表，不修改业务员分组。"""
         scope = (scope or 'all').strip().lower()
+        if scope not in ('all', 'customers', 'stock'):
+            return {"ok": False, "error": "无效的同步范围"}
         payload = {"customers": [], "stock": [], "reps": []}
         # --- Customer（报价工具共享文档的 Customer 页签）---
         # 报价 Customer 列：No.=0, Name=1, City=3, State=4, Salesperson Code=7,
@@ -1318,12 +1333,14 @@ class Api:
             rows = data.get("rows")
             if not isinstance(rows, list) or not rows:
                 return {"ok": False, "error": "Pull 返回空表或格式异常，已保留原有库存。"}
+            stone_rows = 0
             for r in rows:
                 if not isinstance(r, list) or len(r) < 6:
                     return {"ok": False, "error": "Pull 列数或格式异常，已保留原有库存。"}
                 item_no = self._cell(r, 0).strip()
                 if not item_no or not item_no.upper().startswith("SL"):
                     continue
+                stone_rows += 1
                 available = _num(r[4] if len(r) > 4 else "")
                 in_transit = _num(r[5] if len(r) > 5 else "")
                 if available <= 0 and in_transit <= 0:
@@ -1332,15 +1349,36 @@ class Api:
                     "itemNo": item_no, "description": self._cell(r, 1),
                     "available": available, "inTransit": in_transit,
                 })
-        # 同步以 Customer / Pull 为准；普通文件导入保留原有合并逻辑。
-        # 空表拒绝替换；成功读取后，在同一事务中替换客户，不修改销售历史。
-        res = self.apply_master_import(
-            payload, replace_customers=scope in ('all', 'customers'),
-            replace_stock=scope in ('all', 'stock'))
+            if not stone_rows:
+                return {"ok": False, "error": "Pull 中没有有效石材行，已保留原有客户和库存。"}
+        # Compare under the same lock used for writes. Unchanged snapshots must
+        # preserve the revision and report caches instead of forcing recalculation.
+        with DB_LOCK:
+            con = connect()
+            try:
+                unchanged = True
+                if scope in ('all', 'customers'):
+                    current = {r["no"]: row_to_customer(r) for r in con.execute("SELECT * FROM customers")}
+                    incoming = {r["no"]: r for r in payload["customers"]}
+                    unchanged = unchanged and current == incoming
+                if scope in ('all', 'stock'):
+                    current = {r["item_no"]: row_to_stock(r) for r in con.execute("SELECT * FROM stock")}
+                    incoming = {r["itemNo"]: r for r in payload["stock"]}
+                    unchanged = unchanged and current == incoming
+            finally:
+                con.close()
+            if unchanged:
+                res = {"ok": True}
+            else:
+                res = self.apply_master_import(payload,
+                    replace_customers=scope in ('all', 'customers'),
+                    replace_stock=scope in ('all', 'stock'))
         if not res.get("ok"):
             return {"ok": False, "error": "主数据导入失败: %s" % res.get("error")}
-        return {"ok": True, "customers": len(payload["customers"]),
-                "stock": len(payload["stock"]), "reps": len(payload["reps"])}
+        return {"ok": True, "changed": not unchanged,
+                "customers": len(payload["customers"]),
+                "stock": len(payload["stock"]), "reps": 0}
+
 
 
 def _num(v):
@@ -1510,6 +1548,9 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             payload = {}
         args = payload.get("args", [])
+        if method in ('get_meta', 'query_sales') or (method.startswith('get_') and method != 'get_auto_sync_status'):
+            from auto_sync import maybe_start
+            maybe_start(sys.modules[__name__])
         if method == 'cost_status':
             return self._json({'unlocked': self._cost_allowed()})
         if method == 'unlock_cost':
@@ -1658,14 +1699,6 @@ def main():
 
     init_db()
     migrate_local_prefs()
-    if os.environ.get("AUTO_SYNC") == "1":
-        print("AUTO_SYNC=1,正在从 Google Sheets 同步数据...")
-        # 启动同步也仅处理报价共享文档中的客户和库存。
-        try:
-            res = Api().sync_master_from_sheets()
-            print("主数据同步结果: %s" % json.dumps(res, ensure_ascii=False)[:500])
-        except Exception as e:
-            print("主数据同步失败: %s: %s" % (type(e).__name__, e))
     srv = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
     url = "http://0.0.0.0:%d/" % args.port
     print("=" * 60)
@@ -1675,10 +1708,16 @@ def main():
     print("=" * 60)
     if not args.no_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+    from auto_sync import start_worker
+    worker = start_worker(sys.modules[__name__])
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         print("\n已退出")
+    finally:
+        if worker:
+            worker.stop()
+        srv.server_close()
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@
    UniverSheetsFormulaUiEnUS, UniverSheetsNumfmtUiEnUS */
 (function () {
   'use strict';
-  window.BCS_BUILD="Web v9";
+  window.BCS_BUILD="Web v10";
 
   // ================= i18n =================
   let LANG = 'en';
@@ -493,7 +493,50 @@
       costToken='';location.reload();throw new Error('成本权限已过期，请重新解锁');
     }
     const text = await resp.text();
-    try { return JSON.parse(text); } catch (e) { return text; }
+    let result;
+    try { result=JSON.parse(text); } catch (e) { result=text; }
+    if(method==='query_sales' || method==='get_meta' || (method.startsWith('get_') && method!=='get_auto_sync_status'))queueDailySyncStatus();
+    return result;
+  }
+
+  let dailyStatusTimer=null,dailyStatusBusy=false,lastDailyRevision='';
+  function queueDailySyncStatus(delay=300){
+    clearTimeout(dailyStatusTimer);
+    dailyStatusTimer=setTimeout(refreshDailySyncStatus,delay);
+  }
+  async function refreshDailySyncStatus(){
+    if(dailyStatusBusy || document.hidden)return;
+    dailyStatusBusy=true;
+    try{
+      const status=await api('get_auto_sync_status');
+      if(!status || typeof status.enabled!=='boolean')return;
+      let text=LANG==='zh'?'每天首次使用时自动同步':'Auto-sync on first use each day';
+      if(!status.enabled)text=LANG==='zh'?'自动同步未开启':'Auto-sync is off';
+      else if(status.running)text=LANG==='zh'?'正在自动同步客户和库存…':'Syncing customers and stock…';
+      else if(status.successDay===status.today){
+        const at=status.lastSuccessAt?new Date(status.lastSuccessAt*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):'';
+        text=(LANG==='zh'?'今日已同步 ':'Synced today ')+at;
+      }else if(status.lastError)text=LANG==='zh'?'自动同步失败，保留原数据':'Sync failed; previous data retained';
+      for(const id of ['cust-sync','inv-sync']){
+        const button=document.getElementById(id);if(!button)continue;
+        let label=document.getElementById(id+'-status');
+        if(!label){label=document.createElement('span');label.id=id+'-status';label.className='info';label.setAttribute('role','status');button.after(label);}
+        label.textContent=text;label.title=status.lastError||'';
+      }
+      if(lastDailyRevision && status.revision && lastDailyRevision!==status.revision){
+        invalidateCtx();LOOKUP=null;REPS_CACHE=null;
+        if(S.nav==='customers')await renderCustomers();
+        else if(S.nav==='inventory')await renderInventory();
+        else if(S.nav==='dashboard')await renderDashboard();
+        else if(S.nav.startsWith('r:')){
+          const label=document.getElementById('stat-state');
+          if(label)label.textContent=reportState(S.statResults[S.nav.slice(2)]);
+        }
+      }
+      if(status.revision)lastDailyRevision=status.revision;
+      if(status.running)queueDailySyncStatus(1500);
+    }catch(error){console.warn('Daily sync status unavailable',error);}
+    finally{dailyStatusBusy=false;}
   }
 
   // ================= state =================

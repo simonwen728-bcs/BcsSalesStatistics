@@ -9,6 +9,6 @@ services:
       - key: DATABASE_URL
         sync: false
       - key: AUTO_SYNC
-        value: "0"
+        value: "1"
       - key: COST_VIEW_PASSWORD
         sync: false
