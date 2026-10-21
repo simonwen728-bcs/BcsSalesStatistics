@@ -2352,7 +2352,7 @@
     brand.className = 'brand';
     brand.textContent = '📊 ' + t('appName');
     const version=document.createElement('span');
-    version.textContent='V11';
+    version.textContent='V13';
     version.style.cssText='font-size:11px;font-weight:400;color:#a7b8d0;margin-left:7px';
     brand.appendChild(version);
     const spacer = document.createElement('div');
@@ -2684,57 +2684,16 @@
   // 客户动态两块面板各挂一个独立 Univer 实例（一个画布只能显示一张表，左右面板=两台引擎）。
   // 引擎懒加载：首次进入客户动态才创建；主画布（page-sheet）与此互不影响。
   async function initDashEngines() {
-    if (S.dashEngines) { placeDashMounts(); return; }
-    S.dashEngines = {
-      list: makeUniverApp('dashListMount'),
-      ana: makeUniverApp('dashAnaMount'),
-    };
-    placeDashMounts();
-    // 左侧列表：点击行选中客户。挂在 mousedown 上（实测 mousedown 后选区立即正确，
-    // mouseup 后 getActiveRange 反而读到旧值/默认值——挂 mouseup 会固定选中上一行）；
-    // 轮询几次拿到新选区（Univer 应用选区可能晚于监听回调），拿到即选。
-    try {
-      document.body.addEventListener('mousedown', (e) => {
-        if (!S.dashEngines || !e.target || !e.target.closest || !e.target.closest('#dashListMount')) return;
-        const readRow = () => {
-          try {
-            const wb = S.dashEngines.list.api.getActiveWorkbook();
-            const sh = wb.getSheets().find((x) => { try { return x.getSheetName() === '客户列表'; } catch (e2) { return false; } });
-            const ar = sh && sh.getActiveRange ? sh.getActiveRange() : null;
-            return ar && typeof ar.getRow === 'function' ? ar.getRow() : null;
-          } catch (e3) { return null; }
-        };
-        let tries = 0;
-        const tick = () => {
-          const row = readRow();
-          const no = row != null ? (S.dash.rowMap || {})[row] : null;
-          tries++;
-          if ((no && no !== S.dash.customerNo) || tries >= 6) {
-            if (no && no !== S.dash.customerNo) {
-              S.dash.customerNo = no;
-              updateDashSelection();
-              renderDashAna();
-              renderDashChart();
-            }
-            return;
-          }
-          setTimeout(tick, 80);
-        };
-        setTimeout(tick, 0);
-      }, true);
-    } catch (e) { /* ignore */ }
+    // Native dashboard tables need no additional spreadsheet engine.
+    S.dashEngines = S.dashEngines || { native: true };
   }
 
   function updateDashSelection() {
-    try {
-      const wb=S.dashEngines.list.api.getActiveWorkbook();
-      const sh=wb.getSheets().find(x=>x.getSheetName()==='客户列表');
-      if(!sh)return;
-      if(S.dash.selectedRow!=null)sh.getRange(S.dash.selectedRow,0,1,5).setBackground(null);
-      const pair=Object.entries(S.dash.rowMap || {}).find(([,no])=>no===S.dash.customerNo);
-      S.dash.selectedRow=pair ? Number(pair[0]):null;
-      if(S.dash.selectedRow!=null)sh.getRange(S.dash.selectedRow,0,1,5).setBackground('#dbe9ff');
-    }catch(e){ /* native selection remains available */ }
+    document.querySelectorAll('#dash-customer-table tbody tr').forEach(tr => {
+      const selected=tr.dataset.customerNo===S.dash.customerNo;
+      tr.classList.toggle('selected',selected);
+      tr.setAttribute('aria-selected',String(selected));
+    });
   }
 
   // Univer UI 会把挂载元素挪到 body 下：拉回面板容器并触发画布重算
@@ -2875,7 +2834,30 @@
     if (n > 1) spec.numFmt.push({ range: 'C2:C' + n, fmt: '#,##0.00;-#,##0.00;' });
     spec.bg.push({ range: 'A1:E1', color: '#d9eaf7' });
     if (selRow) spec.bg.push({ range: 'A' + selRow + ':E' + selRow, color: '#dbe9ff' });
-    await renderDashSheet('list', spec);
+    const box=document.getElementById('dash-list-box');
+    document.getElementById('dashListMount').style.display='none';
+    let view=document.getElementById('dash-customer-table');
+    if(!view){
+      view=document.createElement('div');view.id='dash-customer-table';box.appendChild(view);
+      const select=(tr)=>{
+        if(!tr || !tr.dataset.customerNo || tr.dataset.customerNo===S.dash.customerNo)return;
+        S.dash.customerNo=tr.dataset.customerNo;
+        updateDashSelection();renderDashAna();renderDashChart();
+      };
+      view.addEventListener('click',e=>select(e.target.closest('tr[data-customer-no]')));
+      view.addEventListener('keydown',e=>{
+        const tr=e.target.closest('tr[data-customer-no]');if(!tr)return;
+        if(e.key==='Enter' || e.key===' '){e.preventDefault();select(tr);}
+        if(e.key==='ArrowDown' || e.key==='ArrowUp'){
+          const next=e.key==='ArrowDown'?tr.nextElementSibling:tr.previousElementSibling;
+          if(next){e.preventDefault();next.focus();select(next);}
+        }
+      });
+    }
+    const y=view.scrollTop;
+    view.innerHTML='<table aria-label="'+esc(t('dashList'))+'"><colgroup>'+[12,48,20,10,10].map(w=>'<col style="width:'+w+'%">').join('')+'</colgroup><thead><tr>'+values[0].map(v=>'<th>'+esc(v)+'</th>').join('')+'</tr></thead><tbody>'+ranking.map(r=>'<tr tabindex="0" data-customer-no="'+esc(r[0])+'">'+r.slice(0,5).map((v,c)=>'<td title="'+esc(v==null?'':v)+'" style="text-align:'+(c===1?'left':c===2?'right':'center')+'">'+esc(c===2?(v===0?'':fmtMoney(v)):v==null?'':v)+'</td>').join('')+'</tr>').join('')+'</tbody></table>';
+    view.scrollTop=y;updateDashSelection();
+
     S.dash.selectedRow=selRow ? selRow-1:null;
   }
 
@@ -2941,13 +2923,13 @@
     let view=document.getElementById('dash-analysis-table');
     if(!view){view=document.createElement('div');view.id='dash-analysis-table';box.appendChild(view);}
     const x=view.scrollLeft,y=view.scrollTop;
-    const widths=[100,200,200,200,100,100,200,200,200];
+    const widths=[8,13,13,13,6,8,13,13,13].map(w=>w+'%');
     const row=(values,header=false)=>'<tr>'+values.map((v,c)=>{
       const tag=header?'th':'td',center=header || [0,4,5].includes(c);
       const value=typeof v==='number'?(v===0?'':fmtMoney(v)):v;
-      return '<'+tag+' style="text-align:'+(center?'center':'right')+'">'+esc(value==null?'':value)+'</'+tag+'>';
+      return '<'+tag+' title="'+esc(value==null?'':value)+'" style="text-align:'+(center?'center':'right')+'">'+esc(value==null?'':value)+'</'+tag+'>';
     }).join('')+'</tr>';
-    view.innerHTML='<table aria-label="'+esc(t('dashAnalysis'))+'" style="width:'+widths.reduce((a,b)=>a+b,0)+'px"><colgroup>'+widths.map(w=>'<col style="width:'+w+'px">').join('')+'</colgroup><thead>'+row(spec.values[0],true)+'</thead><tbody>'+spec.values.slice(1,-1).map(r=>row(r)).join('')+'</tbody><tfoot>'+row(spec.values[spec.values.length-1])+'</tfoot></table>';
+    view.innerHTML='<table aria-label="'+esc(t('dashAnalysis'))+'"><colgroup>'+widths.map(w=>'<col style="width:'+w+'">').join('')+'</colgroup><thead>'+row(spec.values[0],true)+'</thead><tbody>'+spec.values.slice(1,-1).map(r=>row(r)).join('')+'</tbody><tfoot>'+row(spec.values[spec.values.length-1])+'</tfoot></table>';
     view.scrollLeft=x;view.scrollTop=y;
   }
 

@@ -100,7 +100,7 @@
   <link rel="stylesheet" href="sheets-numfmt-ui.css?v=11" />
   <script src="i18n.js?v=31"></script>
   <script src="stats.js?v=23"></script>
-  <script src="app.js?v=115"></script>
+  <script src="app.js?v=131"></script>
   <style>
     * { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; padding: 0; }
@@ -243,13 +243,13 @@
     .dash-cond-group { display: flex; align-items: center; gap: 10px; min-width: 0; flex-wrap: wrap; }
     .dash-grid { flex: 1 1 auto; min-height: 0; display: flex; gap: 10px; }
     .dash-panel {
-      display: flex; flex-direction: column; min-width: 0; background: #fff;
+      display: flex; flex-direction: column; min-width: 0; min-height:0; background: #fff;
       border: 1px solid #dfe6ef; border-radius: 8px; overflow: hidden;
     }
-    #dash-left { flex: 0 0 34%; }
+    #dash-left { flex: 0 0 34%; min-height:0; }
     .dash-right-col { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
-    #dash-analysis-panel { flex: 0 0 45%; }
-    #dash-chart-panel { flex: 1 1 auto; }
+    #dash-analysis-panel { flex: 0 1 422px; max-height:60%; min-height:150px; }
+    #dash-chart-panel { flex: 1 1 auto; min-height:100px; }
     .panel-title { flex: none; padding: 8px 12px; font-weight: 600; font-size: 12.5px; background: #eef3fb; color: #2c3e57; }
     .dash-head-row { display: grid; grid-template-columns: 34% minmax(0, 1fr); align-items: center; gap: 10px; padding: 8px 0; }
     .dash-head-row > .dash-cond-group { padding: 0 10px; box-sizing: border-box; justify-content: flex-start; }
@@ -264,10 +264,25 @@
     #dashListMount .univer-formula-box, #dashListMount .univer-sheet-bar,
     #dashAnaMount .univer-formula-box, #dashAnaMount .univer-sheet-bar { display: none !important; }
     #dash-analysis-table { position:absolute; inset:0; overflow:auto; background:#fff; }
-    #dash-analysis-table table { table-layout:fixed; border-collapse:separate; border-spacing:0; font:14px Arial,sans-serif; color:#182330; }
+    #dash-analysis-table table { width:100%; min-width:650px; table-layout:fixed; border-collapse:separate; border-spacing:0; font:14px Arial,sans-serif; color:#182330; }
     #dash-analysis-table th, #dash-analysis-table td { height:30px; box-sizing:border-box; padding:0 6px; white-space:nowrap; overflow:hidden; border-right:1px solid #b8c4d2; border-bottom:1px solid #b8c4d2; background:#fff; }
     #dash-analysis-table thead th { position:sticky; top:0; z-index:2; background:#d9eaf7; font-weight:700; }
     #dash-analysis-table tfoot td { position:sticky; bottom:0; z-index:2; background:#d9e6f3; font-weight:700; border-top:1px solid #a7b7ca; }
+    /* Only dashboard tables adapt. Fixed report templates elsewhere are unchanged. */
+    #dash-customer-table { position:absolute; inset:0; overflow:auto; background:#fff; }
+    #dash-customer-table table { width:100%; min-width:350px; table-layout:fixed; border-collapse:separate; border-spacing:0; font:14px Arial,sans-serif; color:#182330; }
+    #dash-customer-table th, #dash-customer-table td { height:30px; box-sizing:border-box; padding:0 5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; border-right:1px solid #b8c4d2; border-bottom:1px solid #b8c4d2; }
+    #dash-customer-table th { font-size:11px; line-height:14px; white-space:normal; position:sticky; top:0; z-index:2; background:#d9eaf7; text-align:center; font-weight:700; }
+    #dash-customer-table tbody tr { cursor:pointer; }
+    #dash-customer-table tbody tr.selected td { background:#dbe9ff; }
+    #dash-customer-table tbody tr:hover td { background:#eef4ff; }
+    #dash-customer-table tbody tr:focus-visible { outline:2px solid #174779; outline-offset:-2px; }
+    @media(max-width:1600px) {
+      #dash-analysis-table table, #dash-customer-table table { font-size:12px; }
+      #dash-analysis-table th, #dash-analysis-table td { padding:0 3px; }
+      .dash-cust { font-size:17px; }
+      .dash-head-row > .dash-cond-group { gap:6px; }
+    }
     #dash-chart { flex: 1 1 auto; min-height: 0; }
     .seg { display: flex; gap: 4px; }
     /* ===== modal & toast ===== */
