@@ -941,7 +941,10 @@
   function initUniver() {
     if (S.u) return;
     S.u = makeUniverApp('univerMount');
+    responsiveObserver=new ResizeObserver(scheduleResponsiveColumns);
+    responsiveObserver.observe(document.getElementById('univerMount'));
     S.u.api.onBeforeCommandExecute(command=>{
+      if(columnWidthCommand(command.id) && !S.isRendering && !sizingColumns)throw new Error('COLUMN_WIDTH_LOCKED');
       if(S.nav==='sales' && !costVisible() && !S.isRendering && salesReadOnlyCommand(command.id)){
         toast(LANG==='zh'?'销售明细为只读，请先解锁管理权限':'Sales records are read-only. Unlock management to edit.');
         throw new Error('SALES_READ_ONLY');
@@ -1034,6 +1037,7 @@
       window.dispatchEvent(new Event('resize'));
     } catch (e) { /* ignore */ }
     S.lastRenderedSheet = sheetName;
+    scheduleResponsiveColumns();
     return true;
   }
 
@@ -1052,13 +1056,7 @@
       const base = S.appliedLayouts[layName];
       if (!base) return;   // 本会话未渲染过的表不快照（避免默认值污染记忆）
       // ---- 布局（列宽/行高/冻结） ----
-      const widths = [];
-      const nCols = Math.min(sh.getMaxColumns(), 60);
-      for (let ci = 0; ci < nCols; ci++) {
-        let w = null;
-        try { w = sh.getColumnWidth(ci); } catch (e) { /* ignore */ }
-        widths.push(typeof w === 'number' && w > 0 ? Math.round(w) : null);
-      }
+      const widths = (base.w || []).slice();
       const heights = {};
       const nRows = Math.min(sh.getMaxRows(), 300);
       for (let ri = 0; ri < nRows; ri++) {
@@ -1072,7 +1070,7 @@
         const fr = sh.getFreeze();
         if (fr && (fr.ySplit || fr.xSplit)) fz = { y: fr.ySplit || 0, x: fr.xSplit || 0 };
       } catch (e) { /* ignore */ }
-      const wChanged = (base.w || []).some((bw, ci) => (widths[ci] || null) !== (bw || null));
+      const wChanged = false;
       const hKeys = new Set([...Object.keys(base.h || {}), ...Object.keys(heights)]);
       const hChanged = [...hKeys].some((k) => {
         const bv = base.h && base.h[k] === 24 ? null : ((base.h || {})[k] || null);
@@ -1100,7 +1098,7 @@
         S.appliedStyles[layName] = live;
       }
       if (wChanged || hChanged || fzChanged || stylesChanged) {
-        S.sheetLayouts[layName] = { w: widths, h: heights, fz: fz || null };
+        S.sheetLayouts[layName] = { h: heights, fz: fz || null };
         trackSave(api('set_pref', 'sheetLayouts', JSON.stringify(S.sheetLayouts)));
         if (stylesChanged) {
           trackSave(api('set_pref', 'userStyles', JSON.stringify(S.userStyles)));
@@ -1185,6 +1183,47 @@
     return m[1] + (Number(m[2]) + n) + ':' + m[3] + (Number(m[4]) + n);
   }
 
+  const responsiveSheets = new Map();
+  let sizingColumns = false, responsiveFrame = 0, responsiveObserver = null;
+  function responsiveColumnWidths(weights, available) {
+    const total=weights.reduce((a,b)=>a+b,0);
+    // Keep the complete designed proportion; very wide reports scroll rather than crush text.
+    const scale=Math.max(0.72,(available-68)/total);
+    return weights.map(w=>Math.max(40,Math.round(w*scale)));
+  }
+  function resizeActiveSheet() {
+    if(!S.u || S.isRendering || ['dashboard','history','reps'].includes(S.nav))return;
+    const host=document.getElementById('univerMount');
+    if(!host || host.clientWidth<100 || !host.getClientRects().length)return;
+    const key=S.lastRenderedSheet, state=responsiveSheets.get(key);
+    if(!state)return;
+    const sh=S.u.api.getActiveWorkbook()?.getSheets().find(sh=>sh.getSheetName()===key);
+    if(!sh || state.id!==sh.getSheetId())return;
+    const widths=responsiveColumnWidths(state.weights,host.clientWidth);
+    if(state.actual && widths.every((w,c)=>w===state.actual[c]))return;
+    sizingColumns=true;
+    try {
+      widths.forEach((w,c)=>sh.setColumnWidth(c,w));
+      state.actual=widths;
+      if(S.appliedLayouts[key])S.appliedLayouts[key].w=widths;
+    } finally {sizingColumns=false;}
+  }
+  function scheduleResponsiveColumns() {
+    if(responsiveFrame)return;
+    responsiveFrame=requestAnimationFrame(()=>{responsiveFrame=0;resizeActiveSheet();});
+  }
+  function rememberResponsiveSheet() {
+    const key=S.lastRenderedSheet, baseWidths=S.appliedLayouts[key]?.w;
+    const columns=S.sheetExtent?.[key]?.cols;
+    const weights=baseWidths?.slice(0,columns || baseWidths.length);
+    if(!weights?.length)return;
+    const sh=S.u.api.getActiveWorkbook()?.getSheets().find(sh=>sh.getSheetName()===key);
+    if(sh)responsiveSheets.set(key,{id:sh.getSheetId(),weights:weights.slice(),actual:null});
+  }
+  function columnWidthCommand(id) {
+    return /^(?:sheet\.(?:command|mutation)\.(?:set-worksheet-col-width|delta-column-width|set-col-auto-width|paste-col-width))$/.test(id || '');
+  }
+
   let renderChain = Promise.resolve();
   function renderSpec(spec) {
     // 串行队列：桥接切换/快速切换菜单时的并发渲染排队执行，避免交叉写同一张表卡死主线程
@@ -1198,9 +1237,11 @@
     S.isRendering = true;
     try {
       await renderSpecInnerBody(spec);
+      rememberResponsiveSheet();
       try { if (window.__renderProfile) window.__renderProfile.last.__done = true; } catch (e) { /* ignore */ }
     } finally {
       S.isRendering = false;
+      resizeActiveSheet();
       window.__rsDone = mySeq;
     }
   }
@@ -1362,7 +1403,7 @@
     sh.getMergeData().forEach(r=>r.breakApart());
     sh.getRange(0,0,nr,nc).setValues(matrix);
     if(off) {sh.getRange(0,0,1,nc).merge();sh.getRange(1,0,1,nc).merge();}
-    widths.forEach((w,c)=>{if(lay.w && lay.w[c]>0) widths[c]=lay.w[c];sh.setColumnWidth(c,widths[c]);});
+    widths.forEach((w,c)=>sh.setColumnWidth(c,w));
     sh.showRows(0,nr);sh.setRowHeights(0,nr,30);
     const heights={};Object.entries(lay.h || {}).forEach(([r,h])=>{if(+r<nr && h>=10){sh.setRowHeight(+r,h);heights[r]=h;}});
     const fz=lay.fz || {y:off+1,x:grouped?1:0};sh.setFrozenRows(fz.y || 0);sh.setFrozenColumns(fz.x || 0);
@@ -1705,20 +1746,11 @@
     const layKey = String(spec.sheet || '');
     const savedRaw = S.sheetLayouts[layKey];
     const savedLay = Array.isArray(savedRaw) ? { w: savedRaw, h: {} } : (savedRaw || null);
-    if (savedLay && savedLay.w && savedLay.w.length) {
-      const lim = Math.min(savedLay.w.length, sh.getMaxColumns());
-      for (let c = 0; c < lim; c++) {
-        if (typeof savedLay.w[c] === 'number' && savedLay.w[c] >= 40) {
-          try { sh.setColumnWidth(c, savedLay.w[c]); } catch (e) { /* ignore */ }
-          if (c < finalWidths.length) finalWidths[c] = savedLay.w[c];
-        }
-      }
-    }
     __t('stylesBoldBgAlign');   // 粗体/背景/对齐/合并/列宽合计
     // 自适应行高：批量设置（标题行 30、口径行 24、数据行 26）
     try { sh.setRowHeights(0, 1, 30); } catch (e) { /* ignore */ }
     if (off) { try { sh.setRowHeights(1, 1, 24); } catch (e) { /* ignore */ } }
-    try { sh.setRowHeights(off, Math.max(0, nr - off), 26); } catch (e) { /* ignore */ }
+    try { sh.setRowHeights(off, Math.max(0, nr - off), 30); } catch (e) { /* ignore */ }
     __t('rowHeights');
     if (off) { try { sh.getRange(0, 0, 1, nc).setFontWeight('bold'); } catch (e) { /* ignore */ } }
     // 应用记忆行高（用户调整过的行）
@@ -2352,7 +2384,7 @@
     brand.className = 'brand';
     brand.textContent = '📊 ' + t('appName');
     const version=document.createElement('span');
-    version.textContent='V11';
+    version.textContent='V12';
     version.style.cssText='font-size:11px;font-weight:400;color:#a7b8d0;margin-left:7px';
     brand.appendChild(version);
     const spacer = document.createElement('div');
@@ -2425,7 +2457,7 @@
   window.addEventListener('keydown', (e) => {
     if (e.key === 'F11') { e.preventDefault(); toggleFullscreen(); }
   });
-  window.addEventListener('resize', () => { if (S.dash.chart) S.dash.chart.resize(); });
+  window.addEventListener('resize', () => { scheduleResponsiveColumns(); if (S.dash.chart) S.dash.chart.resize(); });
 
   // ================= sidebar navigation（多级可折叠） =================
   const NAV_ICONS = {
@@ -2684,57 +2716,16 @@
   // 客户动态两块面板各挂一个独立 Univer 实例（一个画布只能显示一张表，左右面板=两台引擎）。
   // 引擎懒加载：首次进入客户动态才创建；主画布（page-sheet）与此互不影响。
   async function initDashEngines() {
-    if (S.dashEngines) { placeDashMounts(); return; }
-    S.dashEngines = {
-      list: makeUniverApp('dashListMount'),
-      ana: makeUniverApp('dashAnaMount'),
-    };
-    placeDashMounts();
-    // 左侧列表：点击行选中客户。挂在 mousedown 上（实测 mousedown 后选区立即正确，
-    // mouseup 后 getActiveRange 反而读到旧值/默认值——挂 mouseup 会固定选中上一行）；
-    // 轮询几次拿到新选区（Univer 应用选区可能晚于监听回调），拿到即选。
-    try {
-      document.body.addEventListener('mousedown', (e) => {
-        if (!S.dashEngines || !e.target || !e.target.closest || !e.target.closest('#dashListMount')) return;
-        const readRow = () => {
-          try {
-            const wb = S.dashEngines.list.api.getActiveWorkbook();
-            const sh = wb.getSheets().find((x) => { try { return x.getSheetName() === '客户列表'; } catch (e2) { return false; } });
-            const ar = sh && sh.getActiveRange ? sh.getActiveRange() : null;
-            return ar && typeof ar.getRow === 'function' ? ar.getRow() : null;
-          } catch (e3) { return null; }
-        };
-        let tries = 0;
-        const tick = () => {
-          const row = readRow();
-          const no = row != null ? (S.dash.rowMap || {})[row] : null;
-          tries++;
-          if ((no && no !== S.dash.customerNo) || tries >= 6) {
-            if (no && no !== S.dash.customerNo) {
-              S.dash.customerNo = no;
-              updateDashSelection();
-              renderDashAna();
-              renderDashChart();
-            }
-            return;
-          }
-          setTimeout(tick, 80);
-        };
-        setTimeout(tick, 0);
-      }, true);
-    } catch (e) { /* ignore */ }
+    // Native dashboard tables need no additional spreadsheet engine.
+    S.dashEngines = S.dashEngines || { native: true };
   }
 
   function updateDashSelection() {
-    try {
-      const wb=S.dashEngines.list.api.getActiveWorkbook();
-      const sh=wb.getSheets().find(x=>x.getSheetName()==='客户列表');
-      if(!sh)return;
-      if(S.dash.selectedRow!=null)sh.getRange(S.dash.selectedRow,0,1,5).setBackground(null);
-      const pair=Object.entries(S.dash.rowMap || {}).find(([,no])=>no===S.dash.customerNo);
-      S.dash.selectedRow=pair ? Number(pair[0]):null;
-      if(S.dash.selectedRow!=null)sh.getRange(S.dash.selectedRow,0,1,5).setBackground('#dbe9ff');
-    }catch(e){ /* native selection remains available */ }
+    document.querySelectorAll('#dash-customer-table tbody tr').forEach(tr => {
+      const selected=tr.dataset.customerNo===S.dash.customerNo;
+      tr.classList.toggle('selected',selected);
+      tr.setAttribute('aria-selected',String(selected));
+    });
   }
 
   // Univer UI 会把挂载元素挪到 body 下：拉回面板容器并触发画布重算
@@ -2875,7 +2866,30 @@
     if (n > 1) spec.numFmt.push({ range: 'C2:C' + n, fmt: '#,##0.00;-#,##0.00;' });
     spec.bg.push({ range: 'A1:E1', color: '#d9eaf7' });
     if (selRow) spec.bg.push({ range: 'A' + selRow + ':E' + selRow, color: '#dbe9ff' });
-    await renderDashSheet('list', spec);
+    const box=document.getElementById('dash-list-box');
+    document.getElementById('dashListMount').style.display='none';
+    let view=document.getElementById('dash-customer-table');
+    if(!view){
+      view=document.createElement('div');view.id='dash-customer-table';box.appendChild(view);
+      const select=(tr)=>{
+        if(!tr || !tr.dataset.customerNo || tr.dataset.customerNo===S.dash.customerNo)return;
+        S.dash.customerNo=tr.dataset.customerNo;
+        updateDashSelection();renderDashAna();renderDashChart();
+      };
+      view.addEventListener('click',e=>select(e.target.closest('tr[data-customer-no]')));
+      view.addEventListener('keydown',e=>{
+        const tr=e.target.closest('tr[data-customer-no]');if(!tr)return;
+        if(e.key==='Enter' || e.key===' '){e.preventDefault();select(tr);}
+        if(e.key==='ArrowDown' || e.key==='ArrowUp'){
+          const next=e.key==='ArrowDown'?tr.nextElementSibling:tr.previousElementSibling;
+          if(next){e.preventDefault();next.focus();select(next);}
+        }
+      });
+    }
+    const y=view.scrollTop;
+    view.innerHTML='<table aria-label="'+esc(t('dashList'))+'"><colgroup>'+[12,48,20,10,10].map(w=>'<col style="width:'+w+'%">').join('')+'</colgroup><thead><tr>'+values[0].map(v=>'<th>'+esc(v)+'</th>').join('')+'</tr></thead><tbody>'+ranking.map(r=>'<tr tabindex="0" data-customer-no="'+esc(r[0])+'">'+r.slice(0,5).map((v,c)=>'<td title="'+esc(v==null?'':v)+'" style="text-align:'+(c===1?'left':c===2?'right':'center')+'">'+esc(c===2?(v===0?'':fmtMoney(v)):v==null?'':v)+'</td>').join('')+'</tr>').join('')+'</tbody></table>';
+    view.scrollTop=y;updateDashSelection();
+
     S.dash.selectedRow=selRow ? selRow-1:null;
   }
 
@@ -2941,13 +2955,13 @@
     let view=document.getElementById('dash-analysis-table');
     if(!view){view=document.createElement('div');view.id='dash-analysis-table';box.appendChild(view);}
     const x=view.scrollLeft,y=view.scrollTop;
-    const widths=[100,200,200,200,100,100,200,200,200];
+    const widths=[8,13,13,13,6,8,13,13,13].map(w=>w+'%');
     const row=(values,header=false)=>'<tr>'+values.map((v,c)=>{
       const tag=header?'th':'td',center=header || [0,4,5].includes(c);
       const value=typeof v==='number'?(v===0?'':fmtMoney(v)):v;
-      return '<'+tag+' style="text-align:'+(center?'center':'right')+'">'+esc(value==null?'':value)+'</'+tag+'>';
+      return '<'+tag+' title="'+esc(value==null?'':value)+'" style="text-align:'+(center?'center':'right')+'">'+esc(value==null?'':value)+'</'+tag+'>';
     }).join('')+'</tr>';
-    view.innerHTML='<table aria-label="'+esc(t('dashAnalysis'))+'" style="width:'+widths.reduce((a,b)=>a+b,0)+'px"><colgroup>'+widths.map(w=>'<col style="width:'+w+'px">').join('')+'</colgroup><thead>'+row(spec.values[0],true)+'</thead><tbody>'+spec.values.slice(1,-1).map(r=>row(r)).join('')+'</tbody><tfoot>'+row(spec.values[spec.values.length-1])+'</tfoot></table>';
+    view.innerHTML='<table aria-label="'+esc(t('dashAnalysis'))+'"><colgroup>'+widths.map(w=>'<col style="width:'+w+'">').join('')+'</colgroup><thead>'+row(spec.values[0],true)+'</thead><tbody>'+spec.values.slice(1,-1).map(r=>row(r)).join('')+'</tbody><tfoot>'+row(spec.values[spec.values.length-1])+'</tfoot></table>';
     view.scrollLeft=x;view.scrollTop=y;
   }
 
@@ -3348,7 +3362,7 @@
       esc(editor.dirty?label('有未保存修改','Unsaved changes'):label('已保存','Saved'))+'</span><span class="spacer"></span><button class="btn" id="rep-editor-reset">'+label('取消修改 / 重新加载','Discard / Reload')+'</button><button class="btn primary" id="rep-editor-save">'+label('保存分组','Save groups')+'</button></div><div class="rep-columns">'+
       ['s1','s2'].map(kind=>{
         const first=kind==='s1';
-        return '<section class="rep-card"><div class="rep-card-head"><strong>'+label(first?'Sales1 · 业务分组':'Sales2 · Inside 分组',first?'Sales1 · Groups':'Sales2 · Inside')+'</strong><span class="spacer"></span><button class="btn sm" data-rep-add="'+kind+'">'+label('添加销售员','Add rep')+'</button></div><div class="rep-scroll"><table class="rep-table"><colgroup><col style="width:100px"><col style="width:180px"><col style="width:150px"><col style="width:70px"></colgroup><thead><tr><th>Code</th><th>Name</th><th>'+ (first?'Group':'Inside')+'</th><th>'+label('操作','Action')+'</th></tr></thead><tbody>'+editor.draft[kind].map((r,i)=>{
+        return '<section class="rep-card"><div class="rep-card-head"><strong>'+label(first?'Sales1 · 业务分组':'Sales2 · Inside 分组',first?'Sales1 · Groups':'Sales2 · Inside')+'</strong><span class="spacer"></span><button class="btn sm" data-rep-add="'+kind+'">'+label('添加销售员','Add rep')+'</button></div><div class="rep-scroll"><table class="rep-table"><colgroup><col style="width:20%"><col style="width:36%"><col style="width:30%"><col style="width:14%"></colgroup><thead><tr><th>Code</th><th>Name</th><th>'+ (first?'Group':'Inside')+'</th><th>'+label('操作','Action')+'</th></tr></thead><tbody>'+editor.draft[kind].map((r,i)=>{
           const attrs=' data-rep-kind="'+kind+'" data-rep-index="'+i+'"';
           const options=['','House','OutSide','Other Branch','IC'];if(first&&!options.includes(r.group))options.push(r.group);
           const fieldLabel=(f)=>' aria-label="'+esc((first?'Sales1 ':'Sales2 ')+(r.code||label('新销售员','new rep'))+' '+f)+'"';
@@ -3428,8 +3442,8 @@
     const batches = await api('list_batches');
     const wrap = document.getElementById('hist-table');
     if (!wrap) return;
-    let html = '<table class="grid"><thead><tr>' +
-      '<th style="width:36px"><input type="checkbox" id="hist-all"></th>' +
+    let html = '<table class="grid"><colgroup><col style="width:5%"><col style="width:15%"><col style="width:40%"><col style="width:15%"><col style="width:25%"></colgroup><thead><tr>' +
+      '<th><input type="checkbox" id="hist-all"></th>' +
       '<th>' + esc(t('histMonth')) + '</th><th>' + esc(t('histFile')) + '</th><th>' + esc(t('histRows')) + '</th><th>' + esc(t('histTime')) + '</th></tr></thead><tbody>';
     if (!batches.length) html += '<tr><td colspan="5" class="empty">' + esc(t('histEmpty')) + '</td></tr>';
     batches.forEach((b) => {
