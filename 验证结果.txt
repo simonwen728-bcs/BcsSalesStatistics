@@ -1,0 +1,30 @@
+﻿[14:00:30] "POST /api/get_meta HTTP/1.1" 200 -
+[14:00:30] "POST /api/get_meta HTTP/1.1" 200 -
+[14:00:30] "POST /api/get_meta HTTP/1.1" 200 -
+[14:00:30] "POST /api/get_meta HTTP/1.1" 200 -
+[14:00:30] "POST /api/get_meta HTTP/1.1" 200 -
+[14:00:30] "POST /api/get_meta HTTP/1.1" 200 -
+[daily-master-sync] 2026-10-20 success 客户=1 库存=1
+[14:00:30] "POST /api/get_auto_sync_status HTTP/1.1" 200 -
+[14:00:30] "POST /api/get_meta HTTP/1.1" 200 -
+[14:00:30] "POST /api/get_meta HTTP/1.1" 200 -
+[14:00:30] "POST /api/query_sales HTTP/1.1" 200 -
+[14:00:30] "POST /api/get_meta HTTP/1.1" 200 -
+PASS: AUTO_SYNC=0 disables; first daily visit runs one background sync; concurrent visitors deduplicated; same-day restart uses persisted Neon-compatible database stamp
+PASS: customers and stock replaced together; source deletions reflected; sales and deleted sales groups preserved; no credentials/claim details in status
+[daily-master-sync] 2026-10-21 failed simulated source failure
+[14:00:30] "POST /api/get_meta HTTP/1.1" 200 -
+[14:00:30] "POST /api/get_auto_sync_status HTTP/1.1" 200 -
+[daily-master-sync] 2026-10-21 success 客户=1 库存=1
+[14:00:30] "POST /api/get_meta HTTP/1.1" 200 -
+[14:00:30] "POST /api/get_auto_sync_status HTTP/1.1" 200 -
+PASS: failed source read preserves both tables and does not count as daily success; next use retries successfully
+[daily-master-sync] 2026-10-22 success 客户=1 库存=1
+[14:00:30] "POST /api/get_meta HTTP/1.1" 200 -
+[14:00:30] "POST /api/get_auto_sync_status HTTP/1.1" 200 -
+[14:00:30] "POST /api/get_meta HTTP/1.1" 200 -
+[14:00:30] "POST /api/sync_master_from_sheets HTTP/1.1" 403 -
+PASS: next local date syncs once; unchanged source keeps data revision and report caches intact
+PASS: manual sync still requires unlock; daily boundary uses America/New_York (DST aware)
+
+PASS: daily sync progress/success/failure/off status visible; tables refresh on changed revision only; unchanged checks do not rerender
