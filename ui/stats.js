@@ -51,6 +51,9 @@ window.STATS = (function () {
     return Number(v) || 0;
   }
 
+  // Customer status uses positive sales rows. Net totals still include all sales/returns.
+  function isPurchase(row) { return amount(row.amount) > 0; }
+
   function range(startStr, endStr) {
     const rawStart = startStr, rawEnd = endStr;
     const start = rawStart ? date(rawStart) : '';
@@ -1135,7 +1138,7 @@ window.STATS = (function () {
       if(!previous || dt>previous.date || (dt===previous.date && (invoiceOrder>0 || (invoiceOrder===0 && recordId.localeCompare(previous.id,undefined,{numeric:true})>0)))) {
         x.latestOrder={date:dt,invoice,id:recordId,sales2};
       }
-      if(!x.lastSale || dt>x.lastSale)x.lastSale=dt;
+      if(isPurchase(r) && (!x.lastSale || dt>x.lastSale))x.lastSale=dt;
       if (!x.name && name) x.name = name;
       if (sales1) x.sales1Amounts[sales1] = (x.sales1Amounts[sales1] || 0) + amt;
       if (sales1 === 'HO' && sales2) x.sales2Amounts[sales2] = (x.sales2Amounts[sales2] || 0) + amt;
@@ -1484,7 +1487,7 @@ window.STATS = (function () {
       if (!dt) return;
       if (dt > latest) latest = dt;
       const no = String(r.custNo || '').trim().toUpperCase();
-      if (no) everPurchased.add(no);
+      if (no && isPurchase(r)) everPurchased.add(no);
     });
     if (!latest) return { error: 'NO_DATA' };
     const sysY = Number(latest.slice(0, 4)), sysM = Number(latest.slice(5, 7));
@@ -1494,7 +1497,7 @@ window.STATS = (function () {
     const recentPurchased = new Set();
     data.forEach((r) => {
       const dt = date(r.soldDate);
-      if (dt && dt >= recent3Start) recentPurchased.add(String(r.custNo || '').trim().toUpperCase());
+      if (dt && dt >= recent3Start && isPurchase(r)) recentPurchased.add(String(r.custNo || '').trim().toUpperCase());
     });
     const yearsSet = new Set();
     const custs = [];
@@ -1650,9 +1653,11 @@ window.STATS = (function () {
       if (!c.name && r.custName) c.name = String(r.custName).trim();
       c.orders += 1;
       c.amt += amount(r.amount);
-      if (dt > c.lastSale) c.lastSale = dt;
-      if (dt >= activeStart && dt <= activeEnd) c.activeIn = true;
-      if (dt >= systemRecentStart) c.recentSale = true;
+      if (isPurchase(r)) {
+        if (dt > c.lastSale) c.lastSale = dt;
+        if (dt >= activeStart && dt <= activeEnd) c.activeIn = true;
+        if (dt >= systemRecentStart) c.recentSale = true;
+      }
     });
     const daysBetween = (a, b) => Math.floor((new Date(b) - new Date(a)) / 86400000);
     const detail = [];
@@ -1851,6 +1856,7 @@ window.STATS = (function () {
       const invoice = normId(r.invoice);
       if (invoice) c.invoiceSet.add(invoice); else c.blankInvoiceCount++;
       c.totalSales += amount(r.amount);
+      if (!isPurchase(r)) return;
       let p = c.purchasesByDay.get(soldDate);
       if (!p) { p = { date: soldDate, sales1Code: '', sales2Code: '' }; c.purchasesByDay.set(soldDate, p); }
       if (!p.sales1Code) p.sales1Code = String(r.rep1 || '').trim().toUpperCase();

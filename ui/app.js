@@ -1314,6 +1314,7 @@
   // Default report conventions: identifiers/counts/ratios 100 centered,
   // customer names 300 left, money 150 right, headers centered, row height 30.
   const REPORT_DEFAULT_LAYOUT = Object.freeze({compact:100,customerName:300,money:150,rowHeight:30});
+  const PURCHASE_STATE_REPORT_IDS=['salesAccount','customerActivity','actDetail','actBySales1','actByCity','actByType','actSleeping','actReact','actNever','actNew'];
   const CUSTOMER_BATCH_IDS=['customerType','salesAccount','actDetail','actBySales1','actByCity','actByType','actSleeping','actReact','actNever','actNew'];
   const CUSTOMER_BATCH_SHEETS=['客户类型统计','客户开户统计','客户活跃统计','活跃-按销售1','活跃-按城市','活跃-按客户类型','沉睡客户','沉睡客户唤醒统计','从未购买','新开户'];
   async function customerBatchContext(opts, knownRevision) {
@@ -1931,7 +1932,7 @@
     const knownCustomerStatsRevision=reusableCustomerStats ? priorCustomerStats.dataRevision || '' : '';
     const batchRange=JSON.stringify([opts.start || '',opts.end || '',opts.fCust || '',opts.fSales || '',opts.fCity || '']);
     const priorBatch=CUSTOMER_BATCH_IDS.includes(def.id) ? S.statResults[def.id] : null;
-    const reusableBatch=priorBatch && !priorBatch.saveFailed && priorBatch.customerBatchAlgorithm===1 && priorBatch.customerBatchRange===batchRange;
+    const reusableBatch=priorBatch && !priorBatch.saveFailed && priorBatch.customerBatchAlgorithm===1 && (!PURCHASE_STATE_REPORT_IDS.includes(def.id) || priorBatch.purchaseRuleVersion===1) && priorBatch.customerBatchRange===batchRange;
     const knownBatchRevision=reusableBatch ? priorBatch.dataRevision || '' : '';
     const isProduct=['cabinetColors','stoneSales'].includes(def.id);
     const productRange=JSON.stringify([opts.start || '',opts.end || '',opts.type || 'SLAB',opts.includeUniversal===true]);
@@ -2025,6 +2026,7 @@
       spec.annualWindow = annualWindow;
       spec.annualAlgorithm = 2;
     }
+    if(PURCHASE_STATE_REPORT_IDS.includes(def.id))spec.purchaseRuleVersion=1;
     if(isProduct){spec.dataRevision=revision;spec.productRange=productRange;spec.productAlgorithm=1;}
     if (CUSTOMER_BATCH_IDS.includes(def.id)) {
       spec.dataRevision=revision;spec.customerBatchRange=batchRange;spec.customerBatchAlgorithm=1;
@@ -2263,6 +2265,10 @@
       await runStat(def,Object.assign({},collectStatOpts(def)),null);return;
     }
     const cached = S.statResults[def.id];
+    // Upgrade saved reports on first open; never display old zero-amount status results.
+    if(cached && PURCHASE_STATE_REPORT_IDS.includes(def.id) && cached.purchaseRuleVersion!==1){
+      await runStat(def,Object.assign({},collectStatOpts(def)),null);return;
+    }
     if(def.id==='salesPerformance' && cached?.stale){
       await runStat(def,Object.assign({},collectStatOpts(def)),null);return;
     }
@@ -2352,7 +2358,7 @@
     brand.className = 'brand';
     brand.textContent = '📊 ' + t('appName');
     const version=document.createElement('span');
-    version.textContent='V13';
+    version.textContent='V14';
     version.style.cssText='font-size:11px;font-weight:400;color:#a7b8d0;margin-left:7px';
     brand.appendChild(version);
     const spacer = document.createElement('div');
@@ -2603,7 +2609,7 @@
   // 右下=最近12个完整月份销售趋势折线图（横）。对应原 Apps Script「客户动态分析」表布局。
   const PERIOD_KEYS = [['ALL', 'periodAll'], ['LAST_MONTH', 'periodLastMonth'], ['THIS_YEAR', 'periodThisYear'], ['YTD', 'periodYtd']];
   let dashboardRenderToken=0;
-  const DASH_SNAPSHOT_KEY='bcs-dashboard-v3';
+  const DASH_SNAPSHOT_KEY='bcs-dashboard-v4';
   function dashStatus(message) {
     let el=document.getElementById('dash-status');
     if(!el){el=document.createElement('span');el.id='dash-status';el.style.cssText='font-size:12px;color:#65758b;margin-left:8px';$('#dash-periods').appendChild(el);}
@@ -2652,7 +2658,7 @@
         try{saved=JSON.parse(localStorage.getItem(DASH_SNAPSHOT_KEY) || 'null');}catch(e){}
         if(!saved){try{const r=await api('load_report','customerDashboard');saved=r && r.report && r.report.spec;}catch(e){}}
         if(renderToken!==dashboardRenderToken)return;
-        if(saved && saved.dashboardAlgorithm===3 && saved.dashboard && saved.dashboard.customers && saved.dashboard.rankings){
+        if(saved && saved.dashboardAlgorithm===4 && saved.dashboard && saved.dashboard.customers && saved.dashboard.rankings){
           S.dash.cache=saved.dashboard;S.dash.cacheWindow=saved.dashboardWindow;
           S.dash.cacheRevision=saved.dataRevision;S.dash.cacheToken=S.dataToken;
         }
@@ -2669,7 +2675,7 @@
       if(!ctx.unchanged){
         S.dash.cache=STATS.customerDashboardData(ctx.sales,{period:S.dash.period,customers:ctx.customers || []},ctx.reps);
         S.dash.cacheRevision=ctx.revision;S.dash.cacheToken=S.dataToken;S.dash.cacheWindow=windowKey;
-        const snapshot={values:[],dashboardAlgorithm:3,dashboard:S.dash.cache,dataRevision:ctx.revision,dashboardWindow:windowKey};
+        const snapshot={values:[],dashboardAlgorithm:4,dashboard:S.dash.cache,dataRevision:ctx.revision,dashboardWindow:windowKey};
         try{localStorage.setItem(DASH_SNAPSHOT_KEY,JSON.stringify(snapshot));}catch(e){}
         trackSave(api('save_report','customerDashboard',snapshot,{},ctx.revision).catch(()=>{}));
         await drawDashboard();
