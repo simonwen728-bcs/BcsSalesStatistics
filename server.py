@@ -1,3 +1,6 @@
+# BCS_DATA_CHECK_REPAIR_1
+# BCS_GUARDED_SALES_IMPORT_1
+# BCS_FIXED_STYLE_STARTUP_1
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -178,13 +181,15 @@ def read_data_revision(con):
     return json.loads(row[0]) if row else "uninitialized"
 
 
-def prefs_load(include_reports=False):
+def prefs_load(include_reports=False, include_user_styles=True):
     with DB_LOCK:
         con = connect()
         try:
             sql = "SELECT key,value FROM bcs_prefs"
             if not include_reports:
                 sql += " WHERE key NOT LIKE 'report:%'"
+            if not include_user_styles:
+                sql += (" AND " if " WHERE " in sql else " WHERE ") + "key <> 'userStyles'"
             return {r[0]: json.loads(r[1]) for r in con.execute(sql)}
         finally:
             con.close()
@@ -336,6 +341,10 @@ class Api:
         records = p.get("records") or []
         if not re.match(r"^\d{4}-\d{2}$", month):
             return {"ok": False, "error": "bad month"}
+        from sales_import_validation import validate
+        import_error = validate(records, month)
+        if import_error:
+            return {"ok": False, "error": import_error}
         batch_id = "b_" + month
         with DB_LOCK:
             con = connect()
@@ -377,16 +386,17 @@ class Api:
         """从销售记录收集 rep1/rep2，补入 reps 表(不覆盖已有)。返回 {s1, s2} 新增数。"""
         have_s1 = {r[0] for r in con.execute("SELECT code FROM reps WHERE kind='s1'")}
         have_s2 = {r[0] for r in con.execute("SELECT code FROM reps WHERE kind='s2'")}
+        from sales_import_validation import valid_rep
         add_s1, add_s2 = 0, 0
         for code, name in con.execute("SELECT DISTINCT rep1, rep1_name FROM sales WHERE rep1<>''"):
             c = (code or "").strip().upper()
-            if c and c not in have_s1:
+            if c and valid_rep(c, name) and c not in have_s1:
                 con.execute("INSERT OR IGNORE INTO reps (kind,code,name,group_) VALUES ('s1',?,?,?)",
                             (c, (name or "").strip(), ""))
                 have_s1.add(c); add_s1 += 1
         for code, name in con.execute("SELECT DISTINCT rep2, rep2_name FROM sales WHERE rep2<>''"):
             c = (code or "").strip().upper()
-            if c and c not in have_s2:
+            if c and valid_rep(c, name) and c not in have_s2:
                 con.execute("INSERT OR IGNORE INTO reps (kind,code,name,group_) VALUES ('s2',?,?,?)",
                             (c, (name or "").strip(), ""))
                 have_s2.add(c); add_s2 += 1
@@ -408,7 +418,7 @@ class Api:
         with DB_LOCK:
             con = connect()
             try:
-                rows = con.execute("SELECT * FROM batches ORDER BY month").fetchall()
+                rows = con.execute("SELECT * FROM batches ORDER BY month DESC").fetchall()
             finally:
                 con.close()
         return [{"id": r["id"], "month": r["month"], "file": r["file"] or "",
@@ -1077,51 +1087,10 @@ class Api:
                 con.close()
         return {"ok": True}
 
-    def initialize_data(self):
-        """初始化:补全销售2 / 补齐销售分组 / 刷新查询数据源。
-        与前端 initializeFlow 对齐，返回 {sales2Filled, newS1, newS2}（之前只返回 counts，初始化实际没做）。"""
-        init_db()
-        with DB_LOCK:
-            con = connect()
-            try:
-                counts = {t: con.execute("SELECT COUNT(*) FROM " + t).fetchone()[0]
-                          for t in ("sales", "customers", "stock", "reps", "batches")}
-                # 补销售2：rep2 为空且 rep1 有值时，rep2=rep1，并补 rep2_name
-                cur = con.execute(
-                    "UPDATE sales SET rep2=rep1, "
-                    "rep2_name=COALESCE(NULLIF(rep2_name,''), NULLIF(rep1_name,''), 'Ex Sales Rep') "
-                    "WHERE (rep2 IS NULL OR rep2='') AND rep1<>''")
-                filled = cur.rowcount or 0
-                # 补 rep2_name：rep2 有值但 rep2_name 为空时取 rep1_name，仍空则 'Ex Sales Rep'
-                con.execute(
-                    "UPDATE sales SET rep2_name=COALESCE(NULLIF(rep1_name,''), 'Ex Sales Rep') "
-                    "WHERE rep2<>'' AND (rep2_name IS NULL OR rep2_name='')")
-                # 补齐销售分组：销售记录里出现过的 code，reps 表没有则补入（后出现的同名覆盖先出现的，与 exe 逻辑一致）
-                have_s1 = {r[0] for r in con.execute("SELECT UPPER(code) FROM reps WHERE kind='s1'")}
-                have_s2 = {r[0] for r in con.execute("SELECT UPPER(code) FROM reps WHERE kind='s2'")}
-                uniq = {}
-                for code, name in con.execute(
-                        "SELECT rep1, rep1_name FROM sales WHERE rep1<>'' ORDER BY id"):
-                    uniq[code.strip().upper()] = (name or "").strip() or code.strip().upper()
-                for code, name in con.execute(
-                        "SELECT rep2, rep2_name FROM sales WHERE rep2<>'' ORDER BY id"):
-                    uniq[code.strip().upper()] = (name or "").strip() or code.strip().upper()
-                new_s1, new_s2 = [], []
-                for code in sorted(uniq):
-                    if code not in have_s1:
-                        con.execute("INSERT OR IGNORE INTO reps (kind,code,name,group_) VALUES ('s1',?,?,?)",
-                                    (code, uniq[code], ""))
-                        new_s1.append(code)
-                    if code not in have_s2:
-                        con.execute("INSERT OR IGNORE INTO reps (kind,code,name,group_) VALUES ('s2',?,?,?)",
-                                    (code, uniq[code], ""))
-                        new_s2.append(code)
-                bump_data_revision(con)
-                con.commit()
-            finally:
-                con.close()
-        return {"ok": True, "sales2Filled": filled, "newS1": new_s1, "newS2": new_s2,
-                "counts": counts}
+    def initialize_data(self, mode="preview", options_json=""):
+        # Legacy clients calling without args now inspect only; no implicit writes.
+        from data_check_repair import run
+        return run(connect, DB_LOCK, bool(DATABASE_URL), DATA_DIR, mode, options_json)
 
     # 每类报表保留最新快照；存于现有 prefs 表，随数据库备份一同保留。
     def _report_revision(self):
@@ -1196,10 +1165,11 @@ class Api:
                     meta = {r[0]: r[1] for r in rows}
             finally:
                 con.close()
-        prefs = prefs_load()
+        prefs = prefs_load(include_user_styles=False)
+        meta.pop("userStyles", None)
         # 前端 set_pref 存到 prefs.json;旧版 meta 表里的设置也合并进来
         # 前端启动时从 meta.prefs 恢复界面设置(行高列宽等)
-        for k in ("sheetLayouts", "userStyles", "navCollapsed", "sidebarCollapsed"):
+        for k in ("sheetLayouts", "navCollapsed", "sidebarCollapsed"):
             if k in meta and k not in prefs:
                 prefs[k] = meta[k]
         meta["prefs"] = {k: v for k, v in prefs.items() if not k.startswith("report:") and k != "masterDailySync"}
@@ -1211,6 +1181,10 @@ class Api:
         return meta
 
     def set_pref(self, key, value):
+        # Fixed templates do not replay legacy cell-coordinate styles.
+        # Preserve the existing legacy record; old tabs must not overwrite it.
+        if key == "userStyles":
+            return {"ok": True, "legacyStylesPreserved": True}
         if key in ("localRepOverrides", "masterDailySync"):
             raise ValueError("保留内部设置，不允许直接修改")
         pref_set(key, value)
