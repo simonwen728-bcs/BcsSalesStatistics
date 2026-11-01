@@ -1,3 +1,4 @@
+// BCS_DASHBOARD_DATA_MONTH_1
 // Statistics engine: faithful JS port of google-excel.appScript (V59) reports.
 // Each generator returns a spec: {sheet, values, merges, numFmt, bold, bg, align, widths, freeze}
 window.STATS = (function () {
@@ -1096,9 +1097,11 @@ window.STATS = (function () {
     const period = ['LAST_MONTH', 'THIS_YEAR', 'YTD'].includes(opts.period) ? opts.period : 'ALL';
     const groupMap = sales1Groups(reps || { s1: [], s2: [] });
     const now = new Date();
-    const last = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    let latest='';
+    data.forEach(r=>{const dt=date(r.soldDate);if(dt>latest)latest=dt;});
+    const last = latest ? new Date(Number(latest.slice(0,4)), Number(latest.slice(5,7))-1, 1) : null;
     const monthKeys = [];
-    for (let i = 11; i >= 0; i--) {
+    for (let i = 11; last && i >= 0; i--) {
       const d = new Date(last.getFullYear(), last.getMonth() - i, 1);
       monthKeys.push(d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'));
     }
@@ -1106,14 +1109,12 @@ window.STATS = (function () {
     const dtext = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
     const periods = {
       ALL: { start: '', end: '' },
-      LAST_MONTH: { start: dtext(new Date(now.getFullYear(), now.getMonth() - 1, 1)), end: dtext(new Date(now.getFullYear(), now.getMonth(), 0)) },
+      LAST_MONTH: { start: last ? dtext(last) : '', end: last ? dtext(new Date(last.getFullYear(),last.getMonth()+1,0)) : '' },
       THIS_YEAR: { start: dtext(new Date(now.getFullYear(), 0, 1)), end: dtext(now) },
-      YTD: (() => { const w = ytdWindow(); return { start: w.start, end: w.ytdEndInclusive }; })(),
+      YTD: { start: monthKeys.length ? monthKeys[0]+'-01' : '', end: last ? dtext(new Date(last.getFullYear(),last.getMonth()+1,0)) : '' },
     };
     const rankStats = { ALL: {}, LAST_MONTH: {}, THIS_YEAR: {}, YTD: {} };
     const customers = {};
-    let latest='';
-    data.forEach(r=>{const dt=date(r.soldDate);if(dt>latest)latest=dt;});
     const master=new Map((opts.customers || []).map(c=>[String(c.no || '').trim().toUpperCase(),c]));
     data.forEach((r) => {
       const sales1Code = String(r.rep1 || '').trim().toUpperCase();
@@ -1193,7 +1194,7 @@ window.STATS = (function () {
           return [x.no, x.name, x.totalAmount, s1, s1 === 'HO' ? (customers[x.no].latestOrder?.sales2 || '') : ''];
         });
     });
-    return { period, monthKeys, customers, rankings, periodLabels: { ALL: '全部', LAST_MONTH: '上月', THIS_YEAR: '今年', YTD: 'TTM' } };
+    return { period, monthKeys, customers, rankings, dataEnd: latest, dataMonth: latest.slice(0,7), periods, periodLabels: { ALL: '全部', LAST_MONTH: '上月', THIS_YEAR: '今年', YTD: 'TTM' } };
   }
 
   // ============================================================

@@ -1,3 +1,4 @@
+// BCS_DASHBOARD_DATA_MONTH_1
 // BCS_DATA_CHECK_REPAIR_1
 // BCS_GUARDED_SALES_IMPORT_1
 // BCS_FIXED_STYLE_STARTUP_1
@@ -636,6 +637,14 @@
   }
   function invalidateCtx() {
     S.ctxCache = null; S.dataToken++;
+    if(S.dash){
+      S.dash.requestEpoch=(S.dash.requestEpoch || 0)+1;
+      S.dash.cache=null; S.dash.cacheRevision=''; S.dash.cacheToken=-1;
+      S.dash.cacheVerified=false; S.dash.snapshotLoaded=true;
+      S.dash.customerNo=''; S.dash.rowMap={};
+      if(S.dash.chart)S.dash.chart.clear();
+      try{localStorage.removeItem('bcs-dashboard-v5');localStorage.removeItem('bcs-dashboard-v5');}catch(e){}
+    }
     Object.values(S.statResults).forEach((r) => { r.stale = true; });
   }
   function reportState(spec) {
@@ -2646,7 +2655,7 @@
   // 右下=最近12个完整月份销售趋势折线图（横）。对应原 Apps Script「客户动态分析」表布局。
   const PERIOD_KEYS = [['ALL', 'periodAll'], ['LAST_MONTH', 'periodLastMonth'], ['THIS_YEAR', 'periodThisYear'], ['YTD', 'periodYtd']];
   let dashboardRenderToken=0;
-  const DASH_SNAPSHOT_KEY='bcs-dashboard-v4';
+  const DASH_SNAPSHOT_KEY='bcs-dashboard-v5';
   function dashStatus(message) {
     let el=document.getElementById('dash-status');
     if(!el){el=document.createElement('span');el.id='dash-status';el.style.cssText='font-size:12px;color:#65758b;margin-left:8px';$('#dash-periods').appendChild(el);}
@@ -2666,7 +2675,9 @@
         b.onclick = () => { S.dash.period = k; renderDashboard(true); };
         seg.appendChild(b);
       });
-      $('#dash-list-title').textContent = t('dashList') + '（' + t(PERIOD_KEYS.find(([k]) => k === S.dash.period)[1]) + '）';
+      const periodName=t(PERIOD_KEYS.find(([k]) => k===S.dash.period)[1]);
+      const dataMonth=dd.dataMonth || '';
+      $('#dash-list-title').textContent=t('dashList')+'（'+periodName+(dataMonth?' · '+dataMonth:'')+'）';
       await initDashEngines();
       if (!dd.customers || !Object.keys(dd.customers).length) {
         $('#dash-cust-title').textContent = '';
@@ -2686,6 +2697,7 @@
   }
   async function renderDashboard(localOnly=false) {
     const renderToken=++dashboardRenderToken;
+    const epoch=S.dash.requestEpoch || 0;
     const windowKey=isoDate(new Date());
     loadBar(true);
     try {
@@ -2694,32 +2706,38 @@
         let saved=null;
         try{saved=JSON.parse(localStorage.getItem(DASH_SNAPSHOT_KEY) || 'null');}catch(e){}
         if(!saved){try{const r=await api('load_report','customerDashboard');saved=r && r.report && r.report.spec;}catch(e){}}
-        if(renderToken!==dashboardRenderToken)return;
-        if(saved && saved.dashboardAlgorithm===4 && saved.dashboard && saved.dashboard.customers && saved.dashboard.rankings){
+        if(renderToken!==dashboardRenderToken || epoch!==(S.dash.requestEpoch || 0))return;
+        if(saved && saved.dashboardAlgorithm===5 && saved.dashboard && saved.dashboard.customers && saved.dashboard.rankings){
           S.dash.cache=saved.dashboard;S.dash.cacheWindow=saved.dashboardWindow;
-          S.dash.cacheRevision=saved.dataRevision;S.dash.cacheToken=S.dataToken;
+          S.dash.cacheRevision=saved.dataRevision;S.dash.cacheToken=-1;S.dash.cacheVerified=false;
         }
       }
-      const valid=S.dash.cache && S.dash.cacheToken===S.dataToken && S.dash.cacheWindow===windowKey;
-      if(S.dash.cache) {
+      const valid=S.dash.cache && S.dash.cacheVerified && S.dash.cacheToken===S.dataToken && S.dash.cacheWindow===windowKey;
+      if(!valid){
+        for(const id of ['dash-customer-table','dash-analysis-table'])document.getElementById(id)?.replaceChildren();
+        const title=document.getElementById('dash-cust-title');if(title)title.textContent='';
+        if(S.dash.chart)S.dash.chart.clear();
+        dashStatus(LANG==='zh'?'正在读取最新销售数据…':'Loading current sales data…');
+      }
+      if(valid) {
         await drawDashboard();
         if(localOnly && valid){dashStatus(LANG==='zh'?'已复用当前数据':'Using current data');return;}
         dashStatus(LANG==='zh'?'已显示保存结果，正在检查更新…':'Showing saved results; checking for updates…');
         loadBar(false);
       }
       const ctx=await normalizeCtx(await api('get_customer_stats_context','','',valid ? S.dash.cacheRevision || '' : ''));
-      if(renderToken!==dashboardRenderToken)return;
+      if(renderToken!==dashboardRenderToken || epoch!==(S.dash.requestEpoch || 0))return;
       if(!ctx.unchanged){
         S.dash.cache=STATS.customerDashboardData(ctx.sales,{period:S.dash.period,customers:ctx.customers || []},ctx.reps);
-        S.dash.cacheRevision=ctx.revision;S.dash.cacheToken=S.dataToken;S.dash.cacheWindow=windowKey;
-        const snapshot={values:[],dashboardAlgorithm:4,dashboard:S.dash.cache,dataRevision:ctx.revision,dashboardWindow:windowKey};
+        S.dash.cacheRevision=ctx.revision;S.dash.cacheToken=S.dataToken;S.dash.cacheWindow=windowKey;S.dash.cacheVerified=true;
+        const snapshot={values:[],dashboardAlgorithm:5,dashboard:S.dash.cache,dataRevision:ctx.revision,dashboardWindow:windowKey};
         try{localStorage.setItem(DASH_SNAPSHOT_KEY,JSON.stringify(snapshot));}catch(e){}
         trackSave(api('save_report','customerDashboard',snapshot,{},ctx.revision).catch(()=>{}));
         await drawDashboard();
       }
       dashStatus(LANG==='zh'?'数据已更新':'Data is current');
     } catch(e) {
-      if(S.dash.cache)dashStatus(LANG==='zh'?'当前显示保存结果；检查更新失败，请重新进入重试':'Showing saved results; update check failed');
+      if(S.dash.cache && S.dash.cacheVerified)dashStatus(LANG==='zh'?'检查更新失败，请重新进入重试':'Update check failed; retry');
       else toast('Load error: '+(e.message || e));
     } finally {if(renderToken===dashboardRenderToken)loadBar(false);}
   }
@@ -2978,6 +2996,7 @@
 
   function renderDashChart() {
     const dd = S.dash.cache;
+    if(!dd){if(S.dash.chart)S.dash.chart.clear();return;}
     const cust = dd.customers[S.dash.customerNo];
     const el = document.getElementById('dash-chart');
     if (!cust || !el) {if(S.dash.chart)S.dash.chart.clear();return;}
