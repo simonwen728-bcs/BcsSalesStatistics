@@ -1,3 +1,6 @@
+// BCS_DATA_CHECK_REPAIR_1
+// BCS_GUARDED_SALES_IMPORT_1
+// BCS_FIXED_STYLE_STARTUP_1
 // BCS Sales Statistics — main application (pywebview + SQLite + Univer)
 /* global I18N, STATS, UniverCore, UniverCoreFacade, UniverEngineRender, UniverEngineFormula,
    UniverUi, UniverSheets, UniverSheetsUi, UniverDocs, UniverDocsUi, UniverSheetsFormula,
@@ -8,7 +11,7 @@
    UniverSheetsFormulaUiEnUS, UniverSheetsNumfmtUiEnUS */
 (function () {
   'use strict';
-  window.BCS_BUILD="Web v11";
+  window.BCS_BUILD="Web V14.1 / 2026-11-01";
 
   // ================= i18n =================
   let LANG = 'en';
@@ -1081,7 +1084,7 @@
       const fzChanged = JSON.stringify(fz) !== JSON.stringify(base.fz || null);
       // ---- 单元格样式差分（与渲染完成基线比） ----
       let stylesChanged = false;
-      const baseStyles = S.appliedStyles[layName];
+      const baseStyles = null; // Fixed cell formats: skip legacy style collection.
       if (baseStyles) {
         const live = captureCellStyles(sh);
         const user = S.userStyles[layKeySafe(layName)] || {};
@@ -1341,7 +1344,6 @@
     if(!S.customerBatchLayouts[key]) {
       delete S.userStyles[key];delete S.sheetLayouts[key];S.customerBatchLayouts[key]=1;
       trackSave(api('set_pref','customerBatchLayouts',JSON.stringify(S.customerBatchLayouts)));
-      trackSave(api('set_pref','userStyles',JSON.stringify(S.userStyles)));
       trackSave(api('set_pref','sheetLayouts',JSON.stringify(S.sheetLayouts)));
     }
     const user={},lay=S.sheetLayouts[key] || {},baseline={},formats=[];
@@ -2296,17 +2298,52 @@
   }
 
   // 初始化（对应原 Apps Script「初始化」）：补全销售2 / 补齐销售分组 / 刷新查询数据源
+  // Data check is read-only until the user chooses specific repair actions.
   async function initializeFlow() {
-    const ok = await confirmModal(t('initConfirm'), t('confirm'));
-    if (!ok) return;
+    const zh = LANG === 'zh';
+    if (repEditorDirty()) { toast(zh ? '请先保存或取消销售分组的未保存修改。' : 'Save or discard unsaved group edits first.'); return; }
     let res;
-    try { res = await api('initialize_data'); } catch (e) { toast('Init error: ' + e); return; }
-    LOOKUP = null;
-    REPS_CACHE = null;
-    renderTab(S.nav);
-    toast(tf('initDone', { s2: res.sales2Filled || 0, s1: (res.newS1 || []).length, s2n: (res.newS2 || []).length }));
-    saved();
+    try { res = await api('initialize_data', 'preview'); }
+    catch (e) { toast((zh ? '检查失败：' : 'Check failed: ') + e); return; }
+    if (!res || !res.ok || res.mode !== 'preview') { toast((res && res.error) || (zh ? '检查接口未就绪，请刷新页面。' : 'Check API is not ready; refresh the page.')); return; }
+    const body = document.createElement('div');
+    body.className = 'form';
+    const line = (label, value) => '<tr><td>' + esc(label) + '</td><td class="num">' + Number(value || 0) + '</td></tr>';
+    body.innerHTML = '<p>' + (zh ? '检查完成，尚未修改数据。' : 'Check completed. No data has been changed.') + '</p>' +
+      '<table class="grid"><thead><tr><th>' + (zh ? '检查项目' : 'Check') + '</th><th>' + (zh ? '数量' : 'Count') + '</th></tr></thead><tbody>' +
+      line(zh ? 'Sales1 目录缺少的销售员' : 'Missing Sales1 directory entries', res.missingS1) +
+      line(zh ? 'Sales2 目录缺少的销售员' : 'Missing Sales2 directory entries', res.missingS2) +
+      line(zh ? '可按相同角色、相同代码补全的明细姓名' : 'Blank record names with one matching name in the same role', res.fillableNames) +
+      line(zh ? '销售2代码为空（需人工确认）' : 'Blank Sales2 codes (manual review)', res.blankCodes && res.blankCodes.s2) +
+      line(zh ? '销售1代码为空（需人工确认）' : 'Blank Sales1 codes (manual review)', res.blankCodes && res.blankCodes.s1) +
+      line(zh ? '姓名冲突、缺少来源或受保护，暂不自动填充' : 'Names without a unique source or protected from repair', res.unresolvedNames) +
+      line(zh ? '异常代码（需人工核对）' : 'Invalid codes (manual review)', res.invalidCodes) + '</tbody></table>' +
+      '<p>' + (zh ? '不会把销售1复制给销售2，不会把代码同时补入两边目录。已有姓名、分组、Inside、锁定和删除标记均保留。' : 'Sales1 will not be copied to Sales2. Codes are added only to the role where they occur. Existing names, groups, Inside selections, locks and deletion flags are preserved.') + '</p>' +
+      ((res.newRepSamples || []).length ? '<p>' + (zh ? '待补目录示例（最多30条）：' : 'Directory entries to add (up to 30): ') + esc(res.newRepSamples.map(r => r.kind + ': ' + r.code + (r.name ? ' / ' + r.name : '')).join('; ')) + '</p>' : '') +
+      '<label class="chk"><input type="checkbox" id="check-add" ' + (!(res.missingS1 + res.missingS2) ? 'disabled' : '') + '> ' + (zh ? '补充缺少的销售员目录（新分组留空）' : 'Add missing directory entries (new groups remain blank)') + '</label>' +
+      '<label class="chk"><input type="checkbox" id="check-names" ' + (!res.fillableNames ? 'disabled' : '') + '> ' + (zh ? '补全有唯一对应来源的空白明细姓名' : 'Fill blank record names with one matching source') + '</label>';
+    showModal(zh ? '数据检查与修复' : 'Data Check & Repair', body, [
+      {label: zh ? '关闭' : 'Close'},
+      {label: zh ? '修复勾选项目' : 'Repair Selected', primary: true, onClick: async (close) => {
+        const addReps = !!body.querySelector('#check-add').checked;
+        const fillNames = !!body.querySelector('#check-names').checked;
+        if (!addReps && !fillNames) { toast(zh ? '请先勾选需要修复的项目。' : 'Select an item to repair first.'); return; }
+        if (body.dataset.busy) return;
+        body.dataset.busy = '1';
+        try {
+          const result = await api('initialize_data', 'apply', JSON.stringify({token: res.token, addReps, fillNames}));
+          if (!result || !result.ok) { toast((result && result.error) || 'Repair failed'); close(); return; }
+          close(); LOOKUP = null; REPS_CACHE = null; repEditor = null; repEditorRequest++; invalidateCtx();
+          if (result.added || result.namesFilled) await invalidateStatOutputs();
+          renderTab(S.nav);
+          toast(zh ? '已补目录 ' + result.added + ' 条、明细姓名 ' + result.namesFilled + ' 条。' : 'Added ' + result.added + ' entries; filled ' + result.namesFilled + ' record names.');
+          saved();
+        } catch (e) { toast((zh ? '修复失败：' : 'Repair failed: ') + e); }
+        finally { delete body.dataset.busy; }
+      }}
+    ]);
   }
+
 
   // ================= menus & tabs =================
   function buildMenus() {
@@ -2323,7 +2360,7 @@
     fileDrop.className = 'dropdown';
     const fileItems = [
       { label: LANG==='zh'?'解锁管理权限…':'Unlock management…', fn: unlockCost },
-      { label: t('miInitialize'), fn: initializeFlow, admin:true },
+      { label: LANG==='zh'?'数据检查与修复…':'Data Check & Repair…', fn: initializeFlow, admin:true },
       { sep: true },
       { sep: true },
       { label: t('miExportBackup'), fn: exportBackup, admin:true },
@@ -2358,7 +2395,7 @@
     brand.className = 'brand';
     brand.textContent = '📊 ' + t('appName');
     const version=document.createElement('span');
-    version.textContent='V14';
+    version.textContent='V14.1';
     version.style.cssText='font-size:11px;font-weight:400;color:#a7b8d0;margin-left:7px';
     brand.appendChild(version);
     const spacer = document.createElement('div');
@@ -3413,7 +3450,7 @@
 
   // ================= import history page（HTML 多选列表，不进工作表） =================
   async function renderHistory() {
-    const batches = await api('list_batches');
+    const batches = (await api('list_batches')).slice().sort((a,b) => String(b.month).localeCompare(String(a.month)) || String(b.importedAt || '').localeCompare(String(a.importedAt || '')));
     const wrap = document.getElementById('hist-table');
     if (!wrap) return;
     let html = '<table class="grid"><thead><tr>' +
@@ -3497,39 +3534,7 @@
   const ZH14_POSITIONAL = ['type', 'itemNo', 'description', 'color', 'soldDate', 'invoice', 'custNo', 'custName', 'rep1', 'rep1Group', 'rep2', 'rep2Group', 'qty', 'amount'];
 
   function parseSalesRows(headers, rows) {
-    const zh = (headers || []).some((h) => String(h).trim() === '类别');
-    let keys = (headers || []).map((h) => {
-      const n = normHeader(h);
-      if (HEADER_MAP[n]) return HEADER_MAP[n];
-      const zhKey = String(h || '').trim();
-      if (HEADER_MAP[zhKey]) return HEADER_MAP[zhKey];
-      return null;
-    });
-    if (zh && keys.filter(Boolean).length < 8) keys = ZH14_POSITIONAL;
-    if (keys.filter(Boolean).length < 8) {
-      // 兜底：英文 19 列格式位置映射（含销售姓名与第 19 列 Cost Amount 成本）
-      keys = ['itemNo', 'description', 'color', 'name', 'type', 'category', 'productType', 'soldDate', 'invoice', 'ledger', 'custNo', 'custName', 'rep1', 'rep1Name', 'rep2', 'rep2Name', 'qty', 'amount', 'cost'];
-    }
-    const recs = [];
-    (rows || []).forEach((arr, idx) => {
-      if (!arr || arr.every((v) => v === null || v === undefined || v === '')) return;
-      const rec = { name: '', category: '', productType: '', ledger: '', rep1Name: '', rep2Name: '', rep1Group: '', rep2Group: '', cost: 0 };
-      arr.forEach((v, ci) => {
-        const k = keys[ci];
-        if (!k || k[0] === '_') return;
-        if (k === 'qty' || k === 'amount' || k === 'cost') rec[k] = Number(STATS.helpers.amount(v)) || 0;
-        else if (k === 'soldDate') rec[k] = STATS.helpers.date(v);
-        else rec[k] = String(v === null || v === undefined ? '' : v).trim();
-      });
-      if (rec.itemNo || rec.invoice || rec.amount) recs.push(rec);
-    });
-    // 表头映射路径下，记录没识别、但列里有实际数据的表头（位置兜底路径每列都有归属，自然为空）——
-    // 导入确认框里提示出来，避免新表头对不上时静默丢列
-    recs.unmapped = (headers || [])
-      .map((h, ci) => ({ h: String(h || '').trim(), ci }))
-      .filter((x) => x.h && !keys[x.ci] && (rows || []).some((r) => r && r[x.ci] !== null && r[x.ci] !== undefined && r[x.ci] !== ''))
-      .map((x) => x.h);
-    return recs;
+    return window.SALES_IMPORT_GUARD.parse(headers, rows, HEADER_MAP, STATS.helpers);
   }
 
   // ================= 网页版文件导入/备份（远程版） =================
@@ -3606,9 +3611,7 @@
     for (const f of files) {
       try {
         const wb = await webImportReadWorkbook(f);
-        // 销售文件取第一张表
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        const hr = webImportSheetToHeadersRows(ws);
+        const hr = window.SALES_IMPORT_GUARD.select(wb, XLSX, HEADER_MAP);
         out.files.push({ fileName: f.name, headers: hr.headers, rows: hr.rows, ok: true });
       } catch (e) {
         out.files.push({ fileName: f.name, ok: false, error: String((e && e.message) || e) });
@@ -3773,7 +3776,9 @@
     const unmappedNotes = [];   // 每个文件没识别的表头（确认框里提示，避免静默丢列）
     for (const f of (res.files || [])) {
       if (!f.ok) { toast((f.fileName || '') + ': ' + (f.error || 'read error')); continue; }
-      const recs = parseSalesRows(f.headers || [], f.rows || []);
+      let recs;
+      try { recs = parseSalesRows(f.headers || [], f.rows || []); }
+      catch (error) { toast((f.fileName || '') + ': ' + error.message); return; }
       if ((recs.unmapped || []).length) {
         unmappedNotes.push('<b>' + esc(f.fileName || '') + '</b>: ' + recs.unmapped.map(esc).join(', '));
       }
@@ -3898,6 +3903,16 @@
   // ================= backup / restore =================
   async function exportBackup() {
     if(!await checkCostAccess()){toast('请先通过 设置 → 解锁管理权限');return;}
+    // The remote endpoint exports a full database. Do not offer ignored filters.
+    if (!BRIDGE || !BRIDGE.export_backup) {
+      const message = LANG==='zh'
+        ? '下载完整数据库备份？包含销售、客户、库存、销售分组和设置。还原此文件会覆盖这些数据，不能只还原某个分组。'
+        : 'Download a full database backup? It contains sales, customers, stock, sales groups and settings. Web restore replaces all these tables; it cannot restore just one group.';
+      if (!await confirmModal(message, LANG==='zh'?'下载完整备份':'Download Full Backup')) return;
+      try { await webImportDownloadBackup(); toast(LANG==='zh'?'完整数据库备份已下载':'Full database backup downloaded'); }
+      catch(error) { toast('Export failed: '+error); }
+      return;
+    }
     const body = document.createElement('div');
     body.className = 'form';
     body.innerHTML =
@@ -3960,7 +3975,7 @@
     if (!Array.isArray(info.months)) {
       const file = await webImportPickBackupFile();
       if (!file) return;
-      const ok = await confirmModal(t('bkRestoreTitle') + '：' + file.name + ' ？', t('bkExecute'));
+      const ok = await confirmModal((LANG==='zh'?'整库还原将覆盖销售、客户、库存、销售分组和设置。请先下载当前完整备份。文件：':'Full restore replaces sales, customers, stock, sales groups and settings. Download a current full backup first. File: ') + file.name, t('bkExecute'));
       if (!ok) return;
       let up;
       try { up = await webImportUploadBackupFile(file); } catch (e) { toast('Restore failed: ' + e); return; }
@@ -4266,9 +4281,6 @@
       } catch (e) { S.sheetLayouts = {}; }
     }
     if(meta.prefs && meta.prefs.customerBatchLayouts) {try{S.customerBatchLayouts=JSON.parse(meta.prefs.customerBatchLayouts) || {};}catch(e){}}
-    if (meta.prefs && meta.prefs.userStyles) {
-      try { S.userStyles = JSON.parse(meta.prefs.userStyles) || {}; } catch (e) { S.userStyles = {}; }
-    }
     if (meta.prefs && meta.prefs.salesPageSize !== undefined) {
       S.pageSize = Number(meta.prefs.salesPageSize);
       if (!(S.pageSize >= 0)) S.pageSize = 200;
@@ -4320,7 +4332,7 @@
     } catch (e) { /* ignore */ }
     // 页面可能在 pywebview 宿主里但宿主对象注入稍晚：mock 首渲染延迟 600ms 让位——
     // 桥接在窗口期内注入则只做一次真实渲染，避免 mock+真实两次全量渲染并发卡死主线程。
-    bootRenderTimer = setTimeout(() => { bootRenderTimer = null; applyLocaleAndRender(); }, 600);
+    bootRenderTimer = setTimeout(() => { bootRenderTimer = null; applyLocaleAndRender(); }, 0);
     if (USING_MOCK) {
       const iv = setInterval(() => {
         if (!USING_MOCK) { clearInterval(iv); return; }
