@@ -1,3 +1,4 @@
+# BCS_EDITABLE_GROUPS_1
 # BCS_DATA_CHECK_REPAIR_1
 # BCS_GUARDED_SALES_IMPORT_1
 # BCS_FIXED_STYLE_STARTUP_1
@@ -116,10 +117,22 @@ def row_to_stock(r):
     }
 
 
+def canonical_rep_group(kind, value):
+    raw = str(value or "").strip()
+    if len(raw) > 64 or any(ord(c) < 32 for c in raw):
+        raise ValueError("部门名称最长64个字符，不能包含换行或控制字符")
+    raw = re.sub(r"\s+", " ", raw)
+    if kind == "s2":
+        if raw.lower() not in ("", "inside"):
+            raise ValueError("Sales2 只支持 Inside 勾选")
+        return raw.lower()
+    return {"house":"House", "outside":"Outside", "other branch":"Other Branch", "ic":"IC"}.get(raw.lower(), raw)
+
+
 def row_to_rep(r):
     return {
         "code": r["code"] or "", "name": r["name"] or "",
-        "group": r["group_"] or "", "locked": bool(r["locked"]),
+        "group": canonical_rep_group(r["kind"], r["group_"]), "locked": bool(r["locked"]),
     }
 
 
@@ -131,11 +144,9 @@ def normalize_rep(kind, value):
     if not code or len(code) > 64 or any(c.isspace() or ord(c) < 32 for c in code):
         raise ValueError("销售编号不能为空，也不能包含空格")
     name = str(value.get("name") or "").strip()
-    group = str(value.get("group") or "").strip()
-    allowed = {"": "", "house": "House", "outside": "OutSide", "other branch": "Other Branch", "ic": "IC"} if kind == "s1" else {"": "", "inside": "inside"}
-    if group.lower() not in allowed:
-        raise ValueError("销售分组无效: " + group)
-    return {"kind": kind, "code": code, "name": name, "group": allowed[group.lower()]}
+    group = canonical_rep_group(kind, value.get("group"))
+    return {"kind": kind, "code": code, "name": name, "group": group}
+
 
 
 def write_rep(con, rep, deleted=False):
