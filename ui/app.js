@@ -1,3 +1,4 @@
+// BCS_EDITABLE_GROUPS_1
 // BCS_DASHBOARD_DATA_MONTH_1
 // BCS_DATA_CHECK_REPAIR_1
 // BCS_GUARDED_SALES_IMPORT_1
@@ -12,7 +13,7 @@
    UniverSheetsFormulaUiEnUS, UniverSheetsNumfmtUiEnUS */
 (function () {
   'use strict';
-  window.BCS_BUILD="Web V14.1 / 2026-11-01";
+  window.BCS_BUILD="Web V14.2 / 2026-11-01";
 
   // ================= i18n =================
   let LANG = 'en';
@@ -31,8 +32,8 @@
       s1: [
         { code: 'HO', name: 'HOUSE ACCT', group: 'House' },
         { code: 'SW', name: 'SIMON WEN', group: 'House' },
-        { code: 'AB', name: 'Aliasgher Bandali', group: 'OutSide' },
-        { code: 'AD', name: 'Ana E. Diaz Rojas', group: 'OutSide' },
+        { code: 'AB', name: 'Aliasgher Bandali', group: 'Outside' },
+        { code: 'AD', name: 'Ana E. Diaz Rojas', group: 'Outside' },
         { code: 'KC', name: 'Kevin Canning', group: 'IC' },
       ],
       s2: [
@@ -1922,7 +1923,7 @@
     const performanceRange = JSON.stringify([opts.start || '', opts.end || '']);
     const priorPerformance = def.id === 'salesPerformance' ? S.statResults[def.id] : null;
     const reusablePerformance = priorPerformance && !priorPerformance.saveFailed &&
-      priorPerformance.performanceAlgorithm === 1 && priorPerformance.performanceRange === performanceRange;
+      priorPerformance.performanceAlgorithm === 2 && priorPerformance.performanceRange === performanceRange;
     const knownPerformanceRevision = reusablePerformance ? priorPerformance.dataRevision || '' : '';
     const priorOrders = def.id === 'customerOrders' ? S.statResults[def.id] : null;
     const reusableOrders = priorOrders && !priorOrders.saveFailed &&
@@ -2061,7 +2062,7 @@
     if (def.id === 'salesPerformance') {
       spec.dataRevision = revision;
       spec.performanceRange = performanceRange;
-      spec.performanceAlgorithm = 1;
+      spec.performanceAlgorithm = 2;
     }
     S.yearToggle = spec.yearGroups ? { sheet: spec.sheet, groups: spec.yearGroups } : null;
     spec.stale = false;
@@ -2280,7 +2281,7 @@
     if(cached && PURCHASE_STATE_REPORT_IDS.includes(def.id) && cached.purchaseRuleVersion!==1){
       await runStat(def,Object.assign({},collectStatOpts(def)),null);return;
     }
-    if(def.id==='salesPerformance' && cached?.stale){
+    if(def.id==='salesPerformance' && cached && (cached.stale || cached.performanceAlgorithm!==2)){
       await runStat(def,Object.assign({},collectStatOpts(def)),null);return;
     }
     $('#stat-state').textContent = reportState(cached);
@@ -2404,7 +2405,7 @@
     brand.className = 'brand';
     brand.textContent = '📊 ' + t('appName');
     const version=document.createElement('span');
-    version.textContent='V14.1';
+    version.textContent='V14.2';
     version.style.cssText='font-size:11px;font-weight:400;color:#a7b8d0;margin-left:7px';
     brand.appendChild(version);
     const spacer = document.createElement('div');
@@ -3344,7 +3345,7 @@
   function repText(zh,en){return LANG==='zh'?zh:en;}
   function repEditorDirty(){return !!(repEditor && repEditor.dirty);}
   function repBaseRow(r){
-    const raw=String(r.group||'').trim(), group=({house:'House',outside:'OutSide','other branch':'Other Branch',ic:'IC',inside:'inside'})[raw.toLowerCase()] || raw;
+    const raw=String(r.group||'').trim(), group=({house:'House',outside:'Outside','other branch':'Other Branch',ic:'IC',inside:'inside'})[raw.toLowerCase()] || raw;
     return {code:String(r.code||'').trim().toUpperCase(),name:r.name||'',group};
   }
   function repStatus(message,error=false){
@@ -3394,10 +3395,10 @@
         const first=kind==='s1';
         return '<section class="rep-card"><div class="rep-card-head"><strong>'+label(first?'Sales1 · 业务分组':'Sales2 · Inside 分组',first?'Sales1 · Groups':'Sales2 · Inside')+'</strong><span class="spacer"></span><button class="btn sm" data-rep-add="'+kind+'">'+label('添加销售员','Add rep')+'</button></div><div class="rep-scroll"><table class="rep-table"><colgroup><col style="width:100px"><col style="width:180px"><col style="width:150px"><col style="width:70px"></colgroup><thead><tr><th>Code</th><th>Name</th><th>'+ (first?'Group':'Inside')+'</th><th>'+label('操作','Action')+'</th></tr></thead><tbody>'+editor.draft[kind].map((r,i)=>{
           const attrs=' data-rep-kind="'+kind+'" data-rep-index="'+i+'"';
-          const options=['','House','OutSide','Other Branch','IC'];if(first&&!options.includes(r.group))options.push(r.group);
+          const options=Array.from(new Set(['House','Outside','Other Branch','IC',...editor.draft.s1.map(x=>String(x.group||'').trim())].filter(Boolean))); 
           const fieldLabel=(f)=>' aria-label="'+esc((first?'Sales1 ':'Sales2 ')+(r.code||label('新销售员','new rep'))+' '+f)+'"';
           return '<tr><td><input data-rep-field="code"'+attrs+fieldLabel('Code')+' value="'+esc(r.code)+'"'+(r._new?'':' readonly')+'></td><td><input data-rep-field="name"'+attrs+fieldLabel('Name')+' value="'+esc(r.name)+'"></td><td class="rep-center">'+
-            (first?'<select data-rep-field="group"'+attrs+fieldLabel('Group')+'>'+options.map(g=>'<option value="'+esc(g)+'"'+(r.group===g?' selected':'')+'>'+esc(g||'—')+'</option>').join('')+'</select>':'<input type="checkbox" data-rep-field="inside"'+attrs+fieldLabel('Inside')+(String(r.group).toLowerCase()==='inside'?' checked':'')+'>')+
+            (first?'<input data-rep-field="group"'+attrs+fieldLabel('Group')+' list="rep-group-options-'+i+'" maxlength="64" placeholder="'+label('输入或选择部门','Type or select group')+'" value="'+esc(r.group)+'"><datalist id="rep-group-options-'+i+'">'+options.map(g=>'<option value="'+esc(g)+'"></option>').join('')+'</datalist>':'<input type="checkbox" data-rep-field="inside"'+attrs+fieldLabel('Inside')+(String(r.group).toLowerCase()==='inside'?' checked':'')+'>')+
             '</td><td class="rep-center"><button class="rep-remove" data-rep-delete="'+kind+':'+i+'"'+fieldLabel('Delete')+'>'+label('删除','Delete')+'</button></td></tr>';
         }).join('')+'</tbody></table></div></section>';
       }).join('')+'</div>';

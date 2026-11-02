@@ -1,3 +1,4 @@
+// BCS_EDITABLE_GROUPS_1
 // BCS_DASHBOARD_DATA_MONTH_1
 // Statistics engine: faithful JS port of google-excel.appScript (V59) reports.
 // Each generator returns a spec: {sheet, values, merges, numFmt, bold, bg, align, widths, freeze}
@@ -70,6 +71,11 @@ window.STATS = (function () {
     if (rg.start && dt < rg.start) return false;
     if (rg.end && dt > rg.end) return false;
     return true;
+  }
+
+  function canonicalSalesGroup(value) {
+    const raw=String(value || '').trim().replace(/\s+/g,' ');
+    return ({house:'House',outside:'Outside','other branch':'Other Branch',ic:'IC'})[raw.toLowerCase()] || raw;
   }
 
   function sales1Groups(reps) {
@@ -256,7 +262,7 @@ window.STATS = (function () {
     (reps.s1 || []).forEach((r) => {
       const s1 = String(r.code || '').trim().toUpperCase();
       const name = String(r.name || '').trim();
-      const group = String(r.group || '').trim();
+      const group = canonicalSalesGroup(r.group);
       if (s1) sales1Info[s1] = { name: name || s1, group: group || (s1 === 'HO' ? 'House' : 'Other Branch') };
     });
     (reps.s2 || []).forEach((r) => {
@@ -299,9 +305,11 @@ window.STATS = (function () {
     });
 
     const sales2List = Array.from(insideSales2).filter((s2) => sales2Totals[s2] !== 0).sort();
-    const groupMap = {};
+    const groupMap = Object.create(null), groupLabels = Object.create(null);
     Object.keys(sales1Amount).forEach((code) => {
-      const g = sales1Info[code].group;
+      const label=canonicalSalesGroup(sales1Info[code].group);
+      const g=label.toUpperCase();
+      if(!groupLabels[g])groupLabels[g]=label;
       if (!groupMap[g]) groupMap[g] = [];
       groupMap[g].push(code);
     });
@@ -328,9 +336,9 @@ window.STATS = (function () {
       const groupTotal = codes.reduce((sum, c) => sum + sales1Amount[c], 0);
       codes.forEach((code) => {
         const amt = sales1Amount[code];
-        leftRows.push([groupName, sales1Info[code].name, amt, groupTotal ? amt / groupTotal : 0, grandSales1 ? amt / grandSales1 : 0]);
+        leftRows.push([groupLabels[groupName], sales1Info[code].name, amt, groupTotal ? amt / groupTotal : 0, grandSales1 ? amt / grandSales1 : 0]);
       });
-      leftRows.push([groupName + ' 小计', '', groupTotal, 1, grandSales1 ? groupTotal / grandSales1 : 0]);
+      leftRows.push([groupLabels[groupName] + ' 小计', '', groupTotal, 1, grandSales1 ? groupTotal / grandSales1 : 0]);
       subtotalRowIdx.push(leftRows.length);
     });
 
