@@ -259,7 +259,7 @@ class Api:
         if f.get("custNo"):
             where.append("cust_no LIKE ?"); params.append("%" + f["custNo"] + "%")
         if f.get("itemNo"):
-            where.append("item_no LIKE ?"); params.append("%" + f["itemNo"] + "%")
+            where.append("item_no = ?" if f.get("itemExact") else "item_no LIKE ?"); params.append(f["itemNo"] if f.get("itemExact") else "%" + f["itemNo"] + "%")
         if f.get("invoice"):
             where.append("invoice LIKE ?"); params.append("%" + f["invoice"] + "%")
         if f.get("type"):
@@ -823,6 +823,26 @@ class Api:
             finally:
                 con.close()
         return [r[0] for r in rows]
+
+    # BCS_ITEM_NAME_SEARCH_1
+    def search_sales_items(self, q=""):
+        q = str(q or "").strip()[:200]
+        like = "%" + q + "%"
+        with DB_LOCK:
+            con = connect()
+            try:
+                rows = con.execute("""
+                    SELECT item_no, MIN(description), MIN(name)
+                    FROM sales
+                    WHERE item_no<>'' AND
+                      (item_no LIKE ? OR description LIKE ? OR name LIKE ?)
+                    GROUP BY item_no
+                    ORDER BY CASE WHEN UPPER(item_no)=UPPER(?) THEN 0 ELSE 1 END, item_no
+                    LIMIT 20
+                """, (like, like, like, q)).fetchall()
+            finally:
+                con.close()
+        return [{"code": r[0], "name": r[1] or r[2] or ""} for r in rows]
 
     def search_descs(self, q=""):
         # 描述模糊搜索走服务端：lookup 里没有描述数据

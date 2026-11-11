@@ -721,12 +721,13 @@
       .map((c) => ({ v: c.name, label: c.name, sub: custNo(c), data: { no: custNo(c) } })));
   }
   // 后端 items 是纯字符串数组（不是 {code,name} 对象）
+  // BCS_ITEM_NAME_SEARCH_1
   async function fuzzyItems(text) {
-    const lk = await getLookup();
-    const norm = (c) => (typeof c === 'string' ? { code: c, name: '' } : c);
-    return cap20(lk.items.filter((c) => { const n = norm(c); return fuzzyHit(text, n.code, n.name); })
-      .map((c) => { const n = norm(c); return { v: n.code, label: n.code, sub: n.name }; }));
+    const list = await api('search_sales_items', text);
+    return (Array.isArray(list) ? list : []).map((n) =>
+      ({v:n.code, label:n.code, sub:n.name}));
   }
+
   // 发票号走服务端实时搜索：lookup 只缓存最新 5000 张，老发票会被 LIMIT 截掉
   async function fuzzyInvoices(text) {
     try {
@@ -1228,7 +1229,22 @@
   }
 
   // 年度固定模板：样式随数据一次写入，避免逐格百分比修复和格式命令。
+  // BCS_ANNUAL_HEADER_LAYOUT_1
+  function annualHeaderLayout(spec) {
+    if (!spec || !spec.yearGroups || !spec.values || !spec.values.length) return;
+    const header=spec.values[0];
+    spec.merges=[];
+    spec.hiddenColumns=[1,2];
+    for(let c=4;c+1<header.length;c+=2){
+      header[c]=String(header[c] || '').replace(/\s*\(%\)$/, '')+' (%)';
+      header[c+1]='';
+      spec.merges.push({startRow:0,endRow:0,startColumn:c,endColumn:c+1});
+    }
+  }
+
   function renderAnnualTemplate(spec, sh) {
+    annualHeaderLayout(spec);
+    sh.getMergeData().forEach((r)=>r.breakApart());
     const started = performance.now();
     const nr = spec.values.length;
     const nc = spec.values[0].length;
@@ -1248,6 +1264,8 @@
       return { v, s: style };
     }));
     sh.getRange(0, 0, nr, nc).setValues(matrix);
+    spec.merges.forEach((m)=>sh.getRange(0,m.startColumn,1,2).merge());
+    sh.hideColumns(1,2);
     const raw = S.sheetLayouts[key];
     const saved = Array.isArray(raw) ? { w: raw, h: {} } : (raw || {});
     // 年度报表固定尺寸，覆盖旧的列宽/行高记忆。
@@ -2109,6 +2127,7 @@
   async function exportStatResult(def) {
     if(costToken && !await checkCostAccess())return;
     const spec = hideCostColumn(S.statResults[def.id]);
+    annualHeaderLayout(spec);
     if (!spec || !spec.values || !spec.values.length) { toast(t('exportEmpty')); return; }
     // 先走后端接口（本地 exe 版桥接实现）；远程版后端无此接口，失败后走浏览器本地导出
     try {
@@ -2119,6 +2138,14 @@
     try {
       await ensureXlsxLib();
       const ws = XLSX.utils.aoa_to_sheet(spec.values);
+      if(spec.yearGroups){
+        ws['!merges']=(spec.merges || []).map((m)=>({s:{r:0,c:m.startColumn},e:{r:0,c:m.endColumn}}));
+        ws['!cols']=spec.values[0].map((_,c)=>({wch:c===0?16:c>=5&&c%2===1?13:20,hidden:c===1||c===2}));
+        for(let r=1;r<spec.values.length;r++) for(let c=1;c<spec.values[0].length;c++){
+          const cell=ws[XLSX.utils.encode_cell({r,c})];
+          if(cell&&cell.t==='n') cell.z=c>=5&&c%2===1?'0.00%':'#,##0.00';
+        }
+      }
       const wb = XLSX.utils.book_new();
       const sheetName = String(spec.sheet || 'Sheet').replace(/[\\/?*[\]:]/g, '').slice(0, 31) || 'Sheet';
       XLSX.utils.book_append_sheet(wb, ws, sheetName);
@@ -4092,7 +4119,8 @@
       end: $('#f-end').value || '',
       custNo: cn.dataset.custNo || '',
       custName: cn.value || '',
-      itemNo: $('#f-itemno').value || '',
+      itemNo: $('#f-itemno').value.trim() || '',
+      itemExact: $('#f-itemno').dataset.itemNo === $('#f-itemno').value.trim(),
       description: $('#f-desc').value || '',
       type: $('#f-type').value || '',
       color: $('#f-color').value || '',
@@ -4112,7 +4140,11 @@
       },
     });
     cn.addEventListener('input', () => { delete cn.dataset.custNo; });
-    attachFuzzy($('#f-itemno'), { fetch: fuzzyItems });
+    const itemInput = $('#f-itemno');
+    attachFuzzy(itemInput, {fetch: fuzzyItems,
+      onPick: (it, input) => { input.dataset.itemNo = it.v; }
+    });
+    itemInput.addEventListener('input', () => { delete itemInput.dataset.itemNo; });
     attachFuzzy($('#f-desc'), { fetch: fuzzyDescs });
     attachFuzzy($('#f-type'), { fetch: (text) => getLookup().then((lk) => fuzzySimple(lk.types, text)) });
     attachFuzzy($('#f-color'), { fetch: (text) => getLookup().then((lk) => fuzzySimple(lk.colors, text)) });
@@ -4124,6 +4156,7 @@
     $('#sales-reset').onclick = () => {
       SALES_FILTER_INPUTS.forEach((id) => { $('#' + id).value = ''; });
       delete $('#f-custname').dataset.custNo;
+      delete $('#f-itemno').dataset.itemNo;
       $('#f-year').value = '';
       collectSalesFilters(); S.salesPage = 0; renderSales();
     };
