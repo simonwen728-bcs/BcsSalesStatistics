@@ -1,3 +1,8 @@
+// BCS_EDITABLE_GROUPS_1
+// BCS_DASHBOARD_DATA_MONTH_1
+// BCS_DATA_CHECK_REPAIR_1
+// BCS_GUARDED_SALES_IMPORT_1
+// BCS_FIXED_STYLE_STARTUP_1
 // BCS Sales Statistics — main application (pywebview + SQLite + Univer)
 /* global I18N, STATS, UniverCore, UniverCoreFacade, UniverEngineRender, UniverEngineFormula,
    UniverUi, UniverSheets, UniverSheetsUi, UniverDocs, UniverDocsUi, UniverSheetsFormula,
@@ -8,7 +13,7 @@
    UniverSheetsFormulaUiEnUS, UniverSheetsNumfmtUiEnUS */
 (function () {
   'use strict';
-  window.BCS_BUILD="Web v11";
+  window.BCS_BUILD="Web V14.2 / 2026-11-01";
 
   // ================= i18n =================
   let LANG = 'en';
@@ -27,8 +32,8 @@
       s1: [
         { code: 'HO', name: 'HOUSE ACCT', group: 'House' },
         { code: 'SW', name: 'SIMON WEN', group: 'House' },
-        { code: 'AB', name: 'Aliasgher Bandali', group: 'OutSide' },
-        { code: 'AD', name: 'Ana E. Diaz Rojas', group: 'OutSide' },
+        { code: 'AB', name: 'Aliasgher Bandali', group: 'Outside' },
+        { code: 'AD', name: 'Ana E. Diaz Rojas', group: 'Outside' },
         { code: 'KC', name: 'Kevin Canning', group: 'IC' },
       ],
       s2: [
@@ -633,6 +638,14 @@
   }
   function invalidateCtx() {
     S.ctxCache = null; S.dataToken++;
+    if(S.dash){
+      S.dash.requestEpoch=(S.dash.requestEpoch || 0)+1;
+      S.dash.cache=null; S.dash.cacheRevision=''; S.dash.cacheToken=-1;
+      S.dash.cacheVerified=false; S.dash.snapshotLoaded=true;
+      S.dash.customerNo=''; S.dash.rowMap={};
+      if(S.dash.chart)S.dash.chart.clear();
+      try{localStorage.removeItem('bcs-dashboard-v5');localStorage.removeItem('bcs-dashboard-v5');}catch(e){}
+    }
     Object.values(S.statResults).forEach((r) => { r.stale = true; });
   }
   function reportState(spec) {
@@ -1081,7 +1094,7 @@
       const fzChanged = JSON.stringify(fz) !== JSON.stringify(base.fz || null);
       // ---- 单元格样式差分（与渲染完成基线比） ----
       let stylesChanged = false;
-      const baseStyles = S.appliedStyles[layName];
+      const baseStyles = null; // Fixed cell formats: skip legacy style collection.
       if (baseStyles) {
         const live = captureCellStyles(sh);
         const user = S.userStyles[layKeySafe(layName)] || {};
@@ -1341,7 +1354,6 @@
     if(!S.customerBatchLayouts[key]) {
       delete S.userStyles[key];delete S.sheetLayouts[key];S.customerBatchLayouts[key]=1;
       trackSave(api('set_pref','customerBatchLayouts',JSON.stringify(S.customerBatchLayouts)));
-      trackSave(api('set_pref','userStyles',JSON.stringify(S.userStyles)));
       trackSave(api('set_pref','sheetLayouts',JSON.stringify(S.sheetLayouts)));
     }
     const user={},lay=S.sheetLayouts[key] || {},baseline={},formats=[];
@@ -1394,11 +1406,10 @@
     try{window.dispatchEvent(new Event('resize'));}catch(e){}
   }
 
-  async function productContext(opts,known,knownMaster='') {
-    const key=JSON.stringify([opts.start || '',opts.end || '',opts.analysis || '']);
+  async function productContext(opts,known) {
+    const key=JSON.stringify([opts.start || '',opts.end || '']);
     const cache=S.productSource && S.productSource.key===key ? S.productSource.ctx : null;
-    const request=opts.analysis==='sku' ? api('get_cabinet_sku_context',opts.start || '',opts.end || '',known || (cache && cache.revision) || '',knownMaster || (cache && cache.cabinetItemRevision) || '') : api('get_product_context',opts.start || '',opts.end || '',known || (cache && cache.revision) || '');
-    const ctx=await normalizeCtx(await request);
+    const ctx=await normalizeCtx(await api('get_product_context',opts.start || '',opts.end || '',known || (cache && cache.revision) || ''));
     if(ctx.unchanged) {if(known) return ctx;if(cache && cache.revision===ctx.revision)return cache;throw new Error('Product cache unavailable');}
     S.productSource={key,ctx};return ctx;
   }
@@ -1407,25 +1418,6 @@
     if(!opts.includes('SLAB'))opts.unshift('SLAB');
     return opts;
   }
-  function renderSkuMixTemplate(spec,sh,values,off) {
-    const nr=values.length,nc=7,key=String(spec.sheet),baseline={};
-    const matrix=values.map((row,r)=>Array.from({length:nc},(_,c)=>{
-      const header=r===off,total=r===nr-1;
-      const st={bl:r===0 || header || total?1:0,vt:2,ht:r<off?1:header?2:c<2?1:2};
-      if(header || total)st.bg={rgb:header?'#d9eaf7':'#d9e6f3'};
-      if(r>off && c>=2)st.n={pattern:zhFmt(c===6?'0.00%;-0.00%;0.00%':'#,##0;-#,##0;0')};
-      cleanGeneratedStyle(st);if(r<300)baseline[r+':'+c]=st;
-      return {v:row[c]===undefined || row[c]===null?'':row[c],s:st};
-    }));
-    sh.getMergeData().forEach(r=>r.breakApart());sh.getRange(0,0,nr,nc).setValues(matrix);
-    if(off){sh.getRange(0,0,1,nc).merge();sh.getRange(1,0,1,nc).merge();}
-    const widths=[250,200,120,120,140,160,140];widths.forEach((w,c)=>sh.setColumnWidth(c,w));
-    sh.showRows(0,nr);sh.setRowHeights(0,nr,30);sh.setFrozenRows(off+1);sh.setFrozenColumns(2);
-    S.appliedLayouts[key]={w:widths,h:{},fz:{y:off+1,x:2}};S.appliedStyles[key]=baseline;
-    S.sheetExtent=S.sheetExtent || {};S.sheetExtent[key]={rows:nr,cols:nc};S.lastRenderedSheet=key;sh.activate();
-    try{window.dispatchEvent(new Event('resize'));}catch(e){}
-  }
-
   function renderProductCustomerTemplate(spec,sh,values,off) {
     const customer=!!spec.customerTemplate,cab=spec.sheet==='橱柜颜色统计';
     const key=String(spec.sheet),nr=values.length,nc=spec.values[0].length,baseline={};
@@ -1642,7 +1634,6 @@
     try {
       if (sh.getMaxRows() < need) sh.insertRows(sh.getMaxRows(), need - sh.getMaxRows());
     } catch (e) { /* ignore */ }
-    if(spec.sheet==='SKU畅销分析'){renderSkuMixTemplate(spec,sh,values,off);return;}
     if(spec.customerTemplate || ['橱柜颜色统计','石材销量统计'].includes(spec.sheet)){renderProductCustomerTemplate(spec,sh,values,off);return;}
     if(spec.salesQueryTemplate) {renderSalesQueryTemplate(spec,sh);return;}
     if (CUSTOMER_BATCH_SHEETS.includes(spec.sheet)) {
@@ -1848,9 +1839,8 @@
     { id: 'g-stats', labelKey: 'navStats', icon: '📊', reports: [
       { id: 'annual', labelKey: 'statAnnual', fields: [] },   // 年度统计固定全量（无时间段）
       { id: 'cabinetColors', labelKey: 'statColors', fields: ['range'], actions: [
-        { labelKey: 'genNoUni', opts: { includeUniversal: false, analysis: '' } },
-        { labelKey: 'genWithUni', opts: { includeUniversal: true, analysis: '' } },
-        { labelKey: 'skuBestSeller', opts: { analysis: 'sku' } },
+        { labelKey: 'genNoUni', opts: { includeUniversal: false } },
+        { labelKey: 'genWithUni', opts: { includeUniversal: true } },
       ] },
       { id: 'stoneSales', labelKey: 'statStone', fields: ['range', 'type'] },
     ] },
@@ -1911,9 +1901,6 @@
     await nextPaint();
     try {
       await runStatInner(def, opts, btn);
-    } catch(error) {
-      if(opts.analysis==='sku')toast((LANG==='zh'?'SKU分析未生成：':'SKU analysis failed: ')+(error.message || error));
-      else throw error;
     } finally {
       statOverlay(false);
       btns.forEach((b) => (b.disabled = false));
@@ -1936,7 +1923,7 @@
     const performanceRange = JSON.stringify([opts.start || '', opts.end || '']);
     const priorPerformance = def.id === 'salesPerformance' ? S.statResults[def.id] : null;
     const reusablePerformance = priorPerformance && !priorPerformance.saveFailed &&
-      priorPerformance.performanceAlgorithm === 1 && priorPerformance.performanceRange === performanceRange;
+      priorPerformance.performanceAlgorithm === 2 && priorPerformance.performanceRange === performanceRange;
     const knownPerformanceRevision = reusablePerformance ? priorPerformance.dataRevision || '' : '';
     const priorOrders = def.id === 'customerOrders' ? S.statResults[def.id] : null;
     const reusableOrders = priorOrders && !priorOrders.saveFailed &&
@@ -1960,7 +1947,7 @@
     const reusableBatch=priorBatch && !priorBatch.saveFailed && priorBatch.customerBatchAlgorithm===1 && (!PURCHASE_STATE_REPORT_IDS.includes(def.id) || priorBatch.purchaseRuleVersion===1) && priorBatch.customerBatchRange===batchRange;
     const knownBatchRevision=reusableBatch ? priorBatch.dataRevision || '' : '';
     const isProduct=['cabinetColors','stoneSales'].includes(def.id);
-    const productRange=JSON.stringify([opts.start || '',opts.end || '',opts.type || 'SLAB',opts.includeUniversal===true,opts.analysis || '']);
+    const productRange=JSON.stringify([opts.start || '',opts.end || '',opts.type || 'SLAB',opts.includeUniversal===true]);
     const priorProduct=isProduct ? S.statResults[def.id]:null;
     const reusableProduct=priorProduct && !priorProduct.saveFailed && priorProduct.productAlgorithm===1 && priorProduct.productRange===productRange;
     const knownProductRevision=reusableProduct ? priorProduct.dataRevision || '':'';
@@ -1974,7 +1961,7 @@
         def.id === 'salesHistory' ? await api('get_history_context', opts.start || '', opts.end || '', {custNo:opts.custNo,itemNo:opts.itemNo,invoice:opts.invoice,sales:opts.sales}, knownHistoryRevision) :
         def.id === 'customerStats' ? await api('get_customer_stats_context', opts.start || '', opts.end || '', knownCustomerStatsRevision) :
         CUSTOMER_BATCH_IDS.includes(def.id) ? await customerBatchContext(opts,knownBatchRevision) :
-        isProduct ? await productContext(opts,knownProductRevision,priorProduct?.cabinetItemRevision || '') :
+        isProduct ? await productContext(opts,knownProductRevision) :
         await api('get_stats_context', opts.start || '', opts.end || ''));
       if (!isProduct && !CUSTOMER_BATCH_IDS.includes(def.id) && !['annual', 'salesPerformance', 'customerOrders', 'categoryQuery', 'salesHistory', 'customerStats'].includes(def.id)) putCtx(opts.start || '', opts.end || '', c);
       return c;
@@ -2010,7 +1997,7 @@
       }
       return;
     }
-    const spec = STATS[def.id](ctx.sales, Object.assign({}, opts, { reps: ctx.reps, stock: ctx.stock, customers: ctx.customers, cabinetItems:ctx.cabinetItems }), t);
+    const spec = STATS[def.id](ctx.sales, Object.assign({}, opts, { reps: ctx.reps, stock: ctx.stock, customers: ctx.customers }), t);
     hideCostColumn(spec);
     const pf2 = performance.now();
     if (!spec || spec.error) {
@@ -2052,7 +2039,7 @@
       spec.annualAlgorithm = 2;
     }
     if(PURCHASE_STATE_REPORT_IDS.includes(def.id))spec.purchaseRuleVersion=1;
-    if(isProduct){if(opts.analysis==='sku')spec.cabinetItemRevision=ctx.cabinetItemRevision;spec.dataRevision=revision;spec.productRange=productRange;spec.productAlgorithm=1;}
+    if(isProduct){spec.dataRevision=revision;spec.productRange=productRange;spec.productAlgorithm=1;}
     if (CUSTOMER_BATCH_IDS.includes(def.id)) {
       spec.dataRevision=revision;spec.customerBatchRange=batchRange;spec.customerBatchAlgorithm=1;
     }
@@ -2075,7 +2062,7 @@
     if (def.id === 'salesPerformance') {
       spec.dataRevision = revision;
       spec.performanceRange = performanceRange;
-      spec.performanceAlgorithm = 1;
+      spec.performanceAlgorithm = 2;
     }
     S.yearToggle = spec.yearGroups ? { sheet: spec.sheet, groups: spec.yearGroups } : null;
     spec.stale = false;
@@ -2132,13 +2119,6 @@
     try {
       await ensureXlsxLib();
       const ws = XLSX.utils.aoa_to_sheet(spec.values);
-      if(spec.sheet==='SKU畅销分析'){
-        ws['!cols']=[250,200,120,120,140,160,140].map(w=>({wpx:w}));
-        ws['!rows']=spec.values.map(()=>({hpx:30}));
-        for(let r=1;r<spec.values.length;r++)for(let c=2;c<7;c++){
-          const cell=ws[XLSX.utils.encode_cell({r,c})];if(cell && typeof cell.v==='number')cell.z=c===6?'0.00%':'#,##0';
-        }
-      }
       const wb = XLSX.utils.book_new();
       const sheetName = String(spec.sheet || 'Sheet').replace(/[\\/?*[\]:]/g, '').slice(0, 31) || 'Sheet';
       XLSX.utils.book_append_sheet(wb, ws, sheetName);
@@ -2301,7 +2281,7 @@
     if(cached && PURCHASE_STATE_REPORT_IDS.includes(def.id) && cached.purchaseRuleVersion!==1){
       await runStat(def,Object.assign({},collectStatOpts(def)),null);return;
     }
-    if(def.id==='salesPerformance' && cached?.stale){
+    if(def.id==='salesPerformance' && cached && (cached.stale || cached.performanceAlgorithm!==2)){
       await runStat(def,Object.assign({},collectStatOpts(def)),null);return;
     }
     $('#stat-state').textContent = reportState(cached);
@@ -2328,17 +2308,52 @@
   }
 
   // 初始化（对应原 Apps Script「初始化」）：补全销售2 / 补齐销售分组 / 刷新查询数据源
+  // Data check is read-only until the user chooses specific repair actions.
   async function initializeFlow() {
-    const ok = await confirmModal(t('initConfirm'), t('confirm'));
-    if (!ok) return;
+    const zh = LANG === 'zh';
+    if (repEditorDirty()) { toast(zh ? '请先保存或取消销售分组的未保存修改。' : 'Save or discard unsaved group edits first.'); return; }
     let res;
-    try { res = await api('initialize_data'); } catch (e) { toast('Init error: ' + e); return; }
-    LOOKUP = null;
-    REPS_CACHE = null;
-    renderTab(S.nav);
-    toast(tf('initDone', { s2: res.sales2Filled || 0, s1: (res.newS1 || []).length, s2n: (res.newS2 || []).length }));
-    saved();
+    try { res = await api('initialize_data', 'preview'); }
+    catch (e) { toast((zh ? '检查失败：' : 'Check failed: ') + e); return; }
+    if (!res || !res.ok || res.mode !== 'preview') { toast((res && res.error) || (zh ? '检查接口未就绪，请刷新页面。' : 'Check API is not ready; refresh the page.')); return; }
+    const body = document.createElement('div');
+    body.className = 'form';
+    const line = (label, value) => '<tr><td>' + esc(label) + '</td><td class="num">' + Number(value || 0) + '</td></tr>';
+    body.innerHTML = '<p>' + (zh ? '检查完成，尚未修改数据。' : 'Check completed. No data has been changed.') + '</p>' +
+      '<table class="grid"><thead><tr><th>' + (zh ? '检查项目' : 'Check') + '</th><th>' + (zh ? '数量' : 'Count') + '</th></tr></thead><tbody>' +
+      line(zh ? 'Sales1 目录缺少的销售员' : 'Missing Sales1 directory entries', res.missingS1) +
+      line(zh ? 'Sales2 目录缺少的销售员' : 'Missing Sales2 directory entries', res.missingS2) +
+      line(zh ? '可按相同角色、相同代码补全的明细姓名' : 'Blank record names with one matching name in the same role', res.fillableNames) +
+      line(zh ? '销售2代码为空（需人工确认）' : 'Blank Sales2 codes (manual review)', res.blankCodes && res.blankCodes.s2) +
+      line(zh ? '销售1代码为空（需人工确认）' : 'Blank Sales1 codes (manual review)', res.blankCodes && res.blankCodes.s1) +
+      line(zh ? '姓名冲突、缺少来源或受保护，暂不自动填充' : 'Names without a unique source or protected from repair', res.unresolvedNames) +
+      line(zh ? '异常代码（需人工核对）' : 'Invalid codes (manual review)', res.invalidCodes) + '</tbody></table>' +
+      '<p>' + (zh ? '不会把销售1复制给销售2，不会把代码同时补入两边目录。已有姓名、分组、Inside、锁定和删除标记均保留。' : 'Sales1 will not be copied to Sales2. Codes are added only to the role where they occur. Existing names, groups, Inside selections, locks and deletion flags are preserved.') + '</p>' +
+      ((res.newRepSamples || []).length ? '<p>' + (zh ? '待补目录示例（最多30条）：' : 'Directory entries to add (up to 30): ') + esc(res.newRepSamples.map(r => r.kind + ': ' + r.code + (r.name ? ' / ' + r.name : '')).join('; ')) + '</p>' : '') +
+      '<label class="chk"><input type="checkbox" id="check-add" ' + (!(res.missingS1 + res.missingS2) ? 'disabled' : '') + '> ' + (zh ? '补充缺少的销售员目录（新分组留空）' : 'Add missing directory entries (new groups remain blank)') + '</label>' +
+      '<label class="chk"><input type="checkbox" id="check-names" ' + (!res.fillableNames ? 'disabled' : '') + '> ' + (zh ? '补全有唯一对应来源的空白明细姓名' : 'Fill blank record names with one matching source') + '</label>';
+    showModal(zh ? '数据检查与修复' : 'Data Check & Repair', body, [
+      {label: zh ? '关闭' : 'Close'},
+      {label: zh ? '修复勾选项目' : 'Repair Selected', primary: true, onClick: async (close) => {
+        const addReps = !!body.querySelector('#check-add').checked;
+        const fillNames = !!body.querySelector('#check-names').checked;
+        if (!addReps && !fillNames) { toast(zh ? '请先勾选需要修复的项目。' : 'Select an item to repair first.'); return; }
+        if (body.dataset.busy) return;
+        body.dataset.busy = '1';
+        try {
+          const result = await api('initialize_data', 'apply', JSON.stringify({token: res.token, addReps, fillNames}));
+          if (!result || !result.ok) { toast((result && result.error) || 'Repair failed'); close(); return; }
+          close(); LOOKUP = null; REPS_CACHE = null; repEditor = null; repEditorRequest++; invalidateCtx();
+          if (result.added || result.namesFilled) await invalidateStatOutputs();
+          renderTab(S.nav);
+          toast(zh ? '已补目录 ' + result.added + ' 条、明细姓名 ' + result.namesFilled + ' 条。' : 'Added ' + result.added + ' entries; filled ' + result.namesFilled + ' record names.');
+          saved();
+        } catch (e) { toast((zh ? '修复失败：' : 'Repair failed: ') + e); }
+        finally { delete body.dataset.busy; }
+      }}
+    ]);
   }
+
 
   // ================= menus & tabs =================
   function buildMenus() {
@@ -2355,7 +2370,7 @@
     fileDrop.className = 'dropdown';
     const fileItems = [
       { label: LANG==='zh'?'解锁管理权限…':'Unlock management…', fn: unlockCost },
-      { label: t('miInitialize'), fn: initializeFlow, admin:true },
+      { label: LANG==='zh'?'数据检查与修复…':'Data Check & Repair…', fn: initializeFlow, admin:true },
       { sep: true },
       { sep: true },
       { label: t('miExportBackup'), fn: exportBackup, admin:true },
@@ -2390,7 +2405,7 @@
     brand.className = 'brand';
     brand.textContent = '📊 ' + t('appName');
     const version=document.createElement('span');
-    version.textContent='V15';
+    version.textContent='V14.2';
     version.style.cssText='font-size:11px;font-weight:400;color:#a7b8d0;margin-left:7px';
     brand.appendChild(version);
     const spacer = document.createElement('div');
@@ -2641,7 +2656,7 @@
   // 右下=最近12个完整月份销售趋势折线图（横）。对应原 Apps Script「客户动态分析」表布局。
   const PERIOD_KEYS = [['ALL', 'periodAll'], ['LAST_MONTH', 'periodLastMonth'], ['THIS_YEAR', 'periodThisYear'], ['YTD', 'periodYtd']];
   let dashboardRenderToken=0;
-  const DASH_SNAPSHOT_KEY='bcs-dashboard-v4';
+  const DASH_SNAPSHOT_KEY='bcs-dashboard-v5';
   function dashStatus(message) {
     let el=document.getElementById('dash-status');
     if(!el){el=document.createElement('span');el.id='dash-status';el.style.cssText='font-size:12px;color:#65758b;margin-left:8px';$('#dash-periods').appendChild(el);}
@@ -2661,7 +2676,9 @@
         b.onclick = () => { S.dash.period = k; renderDashboard(true); };
         seg.appendChild(b);
       });
-      $('#dash-list-title').textContent = t('dashList') + '（' + t(PERIOD_KEYS.find(([k]) => k === S.dash.period)[1]) + '）';
+      const periodName=t(PERIOD_KEYS.find(([k]) => k===S.dash.period)[1]);
+      const dataMonth=dd.dataMonth || '';
+      $('#dash-list-title').textContent=t('dashList')+'（'+periodName+(dataMonth?' · '+dataMonth:'')+'）';
       await initDashEngines();
       if (!dd.customers || !Object.keys(dd.customers).length) {
         $('#dash-cust-title').textContent = '';
@@ -2681,6 +2698,7 @@
   }
   async function renderDashboard(localOnly=false) {
     const renderToken=++dashboardRenderToken;
+    const epoch=S.dash.requestEpoch || 0;
     const windowKey=isoDate(new Date());
     loadBar(true);
     try {
@@ -2689,32 +2707,38 @@
         let saved=null;
         try{saved=JSON.parse(localStorage.getItem(DASH_SNAPSHOT_KEY) || 'null');}catch(e){}
         if(!saved){try{const r=await api('load_report','customerDashboard');saved=r && r.report && r.report.spec;}catch(e){}}
-        if(renderToken!==dashboardRenderToken)return;
-        if(saved && saved.dashboardAlgorithm===4 && saved.dashboard && saved.dashboard.customers && saved.dashboard.rankings){
+        if(renderToken!==dashboardRenderToken || epoch!==(S.dash.requestEpoch || 0))return;
+        if(saved && saved.dashboardAlgorithm===5 && saved.dashboard && saved.dashboard.customers && saved.dashboard.rankings){
           S.dash.cache=saved.dashboard;S.dash.cacheWindow=saved.dashboardWindow;
-          S.dash.cacheRevision=saved.dataRevision;S.dash.cacheToken=S.dataToken;
+          S.dash.cacheRevision=saved.dataRevision;S.dash.cacheToken=-1;S.dash.cacheVerified=false;
         }
       }
-      const valid=S.dash.cache && S.dash.cacheToken===S.dataToken && S.dash.cacheWindow===windowKey;
-      if(S.dash.cache) {
+      const valid=S.dash.cache && S.dash.cacheVerified && S.dash.cacheToken===S.dataToken && S.dash.cacheWindow===windowKey;
+      if(!valid){
+        for(const id of ['dash-customer-table','dash-analysis-table'])document.getElementById(id)?.replaceChildren();
+        const title=document.getElementById('dash-cust-title');if(title)title.textContent='';
+        if(S.dash.chart)S.dash.chart.clear();
+        dashStatus(LANG==='zh'?'正在读取最新销售数据…':'Loading current sales data…');
+      }
+      if(valid) {
         await drawDashboard();
         if(localOnly && valid){dashStatus(LANG==='zh'?'已复用当前数据':'Using current data');return;}
         dashStatus(LANG==='zh'?'已显示保存结果，正在检查更新…':'Showing saved results; checking for updates…');
         loadBar(false);
       }
       const ctx=await normalizeCtx(await api('get_customer_stats_context','','',valid ? S.dash.cacheRevision || '' : ''));
-      if(renderToken!==dashboardRenderToken)return;
+      if(renderToken!==dashboardRenderToken || epoch!==(S.dash.requestEpoch || 0))return;
       if(!ctx.unchanged){
         S.dash.cache=STATS.customerDashboardData(ctx.sales,{period:S.dash.period,customers:ctx.customers || []},ctx.reps);
-        S.dash.cacheRevision=ctx.revision;S.dash.cacheToken=S.dataToken;S.dash.cacheWindow=windowKey;
-        const snapshot={values:[],dashboardAlgorithm:4,dashboard:S.dash.cache,dataRevision:ctx.revision,dashboardWindow:windowKey};
+        S.dash.cacheRevision=ctx.revision;S.dash.cacheToken=S.dataToken;S.dash.cacheWindow=windowKey;S.dash.cacheVerified=true;
+        const snapshot={values:[],dashboardAlgorithm:5,dashboard:S.dash.cache,dataRevision:ctx.revision,dashboardWindow:windowKey};
         try{localStorage.setItem(DASH_SNAPSHOT_KEY,JSON.stringify(snapshot));}catch(e){}
         trackSave(api('save_report','customerDashboard',snapshot,{},ctx.revision).catch(()=>{}));
         await drawDashboard();
       }
       dashStatus(LANG==='zh'?'数据已更新':'Data is current');
     } catch(e) {
-      if(S.dash.cache)dashStatus(LANG==='zh'?'当前显示保存结果；检查更新失败，请重新进入重试':'Showing saved results; update check failed');
+      if(S.dash.cache && S.dash.cacheVerified)dashStatus(LANG==='zh'?'检查更新失败，请重新进入重试':'Update check failed; retry');
       else toast('Load error: '+(e.message || e));
     } finally {if(renderToken===dashboardRenderToken)loadBar(false);}
   }
@@ -2973,6 +2997,7 @@
 
   function renderDashChart() {
     const dd = S.dash.cache;
+    if(!dd){if(S.dash.chart)S.dash.chart.clear();return;}
     const cust = dd.customers[S.dash.customerNo];
     const el = document.getElementById('dash-chart');
     if (!cust || !el) {if(S.dash.chart)S.dash.chart.clear();return;}
@@ -3320,7 +3345,7 @@
   function repText(zh,en){return LANG==='zh'?zh:en;}
   function repEditorDirty(){return !!(repEditor && repEditor.dirty);}
   function repBaseRow(r){
-    const raw=String(r.group||'').trim(), group=({house:'House',outside:'OutSide','other branch':'Other Branch',ic:'IC',inside:'inside'})[raw.toLowerCase()] || raw;
+    const raw=String(r.group||'').trim(), group=({house:'House',outside:'Outside','other branch':'Other Branch',ic:'IC',inside:'inside'})[raw.toLowerCase()] || raw;
     return {code:String(r.code||'').trim().toUpperCase(),name:r.name||'',group};
   }
   function repStatus(message,error=false){
@@ -3370,10 +3395,10 @@
         const first=kind==='s1';
         return '<section class="rep-card"><div class="rep-card-head"><strong>'+label(first?'Sales1 · 业务分组':'Sales2 · Inside 分组',first?'Sales1 · Groups':'Sales2 · Inside')+'</strong><span class="spacer"></span><button class="btn sm" data-rep-add="'+kind+'">'+label('添加销售员','Add rep')+'</button></div><div class="rep-scroll"><table class="rep-table"><colgroup><col style="width:100px"><col style="width:180px"><col style="width:150px"><col style="width:70px"></colgroup><thead><tr><th>Code</th><th>Name</th><th>'+ (first?'Group':'Inside')+'</th><th>'+label('操作','Action')+'</th></tr></thead><tbody>'+editor.draft[kind].map((r,i)=>{
           const attrs=' data-rep-kind="'+kind+'" data-rep-index="'+i+'"';
-          const options=['','House','OutSide','Other Branch','IC'];if(first&&!options.includes(r.group))options.push(r.group);
+          const options=Array.from(new Set(['House','Outside','Other Branch','IC',...editor.draft.s1.map(x=>String(x.group||'').trim())].filter(Boolean))); 
           const fieldLabel=(f)=>' aria-label="'+esc((first?'Sales1 ':'Sales2 ')+(r.code||label('新销售员','new rep'))+' '+f)+'"';
           return '<tr><td><input data-rep-field="code"'+attrs+fieldLabel('Code')+' value="'+esc(r.code)+'"'+(r._new?'':' readonly')+'></td><td><input data-rep-field="name"'+attrs+fieldLabel('Name')+' value="'+esc(r.name)+'"></td><td class="rep-center">'+
-            (first?'<select data-rep-field="group"'+attrs+fieldLabel('Group')+'>'+options.map(g=>'<option value="'+esc(g)+'"'+(r.group===g?' selected':'')+'>'+esc(g||'—')+'</option>').join('')+'</select>':'<input type="checkbox" data-rep-field="inside"'+attrs+fieldLabel('Inside')+(String(r.group).toLowerCase()==='inside'?' checked':'')+'>')+
+            (first?'<input data-rep-field="group"'+attrs+fieldLabel('Group')+' list="rep-group-options-'+i+'" maxlength="64" placeholder="'+label('输入或选择部门','Type or select group')+'" value="'+esc(r.group)+'"><datalist id="rep-group-options-'+i+'">'+options.map(g=>'<option value="'+esc(g)+'"></option>').join('')+'</datalist>':'<input type="checkbox" data-rep-field="inside"'+attrs+fieldLabel('Inside')+(String(r.group).toLowerCase()==='inside'?' checked':'')+'>')+
             '</td><td class="rep-center"><button class="rep-remove" data-rep-delete="'+kind+':'+i+'"'+fieldLabel('Delete')+'>'+label('删除','Delete')+'</button></td></tr>';
         }).join('')+'</tbody></table></div></section>';
       }).join('')+'</div>';
@@ -3445,7 +3470,7 @@
 
   // ================= import history page（HTML 多选列表，不进工作表） =================
   async function renderHistory() {
-    const batches = await api('list_batches');
+    const batches = (await api('list_batches')).slice().sort((a,b) => String(b.month).localeCompare(String(a.month)) || String(b.importedAt || '').localeCompare(String(a.importedAt || '')));
     const wrap = document.getElementById('hist-table');
     if (!wrap) return;
     let html = '<table class="grid"><thead><tr>' +
@@ -3529,39 +3554,7 @@
   const ZH14_POSITIONAL = ['type', 'itemNo', 'description', 'color', 'soldDate', 'invoice', 'custNo', 'custName', 'rep1', 'rep1Group', 'rep2', 'rep2Group', 'qty', 'amount'];
 
   function parseSalesRows(headers, rows) {
-    const zh = (headers || []).some((h) => String(h).trim() === '类别');
-    let keys = (headers || []).map((h) => {
-      const n = normHeader(h);
-      if (HEADER_MAP[n]) return HEADER_MAP[n];
-      const zhKey = String(h || '').trim();
-      if (HEADER_MAP[zhKey]) return HEADER_MAP[zhKey];
-      return null;
-    });
-    if (zh && keys.filter(Boolean).length < 8) keys = ZH14_POSITIONAL;
-    if (keys.filter(Boolean).length < 8) {
-      // 兜底：英文 19 列格式位置映射（含销售姓名与第 19 列 Cost Amount 成本）
-      keys = ['itemNo', 'description', 'color', 'name', 'type', 'category', 'productType', 'soldDate', 'invoice', 'ledger', 'custNo', 'custName', 'rep1', 'rep1Name', 'rep2', 'rep2Name', 'qty', 'amount', 'cost'];
-    }
-    const recs = [];
-    (rows || []).forEach((arr, idx) => {
-      if (!arr || arr.every((v) => v === null || v === undefined || v === '')) return;
-      const rec = { name: '', category: '', productType: '', ledger: '', rep1Name: '', rep2Name: '', rep1Group: '', rep2Group: '', cost: 0 };
-      arr.forEach((v, ci) => {
-        const k = keys[ci];
-        if (!k || k[0] === '_') return;
-        if (k === 'qty' || k === 'amount' || k === 'cost') rec[k] = Number(STATS.helpers.amount(v)) || 0;
-        else if (k === 'soldDate') rec[k] = STATS.helpers.date(v);
-        else rec[k] = String(v === null || v === undefined ? '' : v).trim();
-      });
-      if (rec.itemNo || rec.invoice || rec.amount) recs.push(rec);
-    });
-    // 表头映射路径下，记录没识别、但列里有实际数据的表头（位置兜底路径每列都有归属，自然为空）——
-    // 导入确认框里提示出来，避免新表头对不上时静默丢列
-    recs.unmapped = (headers || [])
-      .map((h, ci) => ({ h: String(h || '').trim(), ci }))
-      .filter((x) => x.h && !keys[x.ci] && (rows || []).some((r) => r && r[x.ci] !== null && r[x.ci] !== undefined && r[x.ci] !== ''))
-      .map((x) => x.h);
-    return recs;
+    return window.SALES_IMPORT_GUARD.parse(headers, rows, HEADER_MAP, STATS.helpers);
   }
 
   // ================= 网页版文件导入/备份（远程版） =================
@@ -3638,9 +3631,7 @@
     for (const f of files) {
       try {
         const wb = await webImportReadWorkbook(f);
-        // 销售文件取第一张表
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        const hr = webImportSheetToHeadersRows(ws);
+        const hr = window.SALES_IMPORT_GUARD.select(wb, XLSX, HEADER_MAP);
         out.files.push({ fileName: f.name, headers: hr.headers, rows: hr.rows, ok: true });
       } catch (e) {
         out.files.push({ fileName: f.name, ok: false, error: String((e && e.message) || e) });
@@ -3805,7 +3796,9 @@
     const unmappedNotes = [];   // 每个文件没识别的表头（确认框里提示，避免静默丢列）
     for (const f of (res.files || [])) {
       if (!f.ok) { toast((f.fileName || '') + ': ' + (f.error || 'read error')); continue; }
-      const recs = parseSalesRows(f.headers || [], f.rows || []);
+      let recs;
+      try { recs = parseSalesRows(f.headers || [], f.rows || []); }
+      catch (error) { toast((f.fileName || '') + ': ' + error.message); return; }
       if ((recs.unmapped || []).length) {
         unmappedNotes.push('<b>' + esc(f.fileName || '') + '</b>: ' + recs.unmapped.map(esc).join(', '));
       }
@@ -3930,6 +3923,16 @@
   // ================= backup / restore =================
   async function exportBackup() {
     if(!await checkCostAccess()){toast('请先通过 设置 → 解锁管理权限');return;}
+    // The remote endpoint exports a full database. Do not offer ignored filters.
+    if (!BRIDGE || !BRIDGE.export_backup) {
+      const message = LANG==='zh'
+        ? '下载完整数据库备份？包含销售、客户、库存、销售分组和设置。还原此文件会覆盖这些数据，不能只还原某个分组。'
+        : 'Download a full database backup? It contains sales, customers, stock, sales groups and settings. Web restore replaces all these tables; it cannot restore just one group.';
+      if (!await confirmModal(message, LANG==='zh'?'下载完整备份':'Download Full Backup')) return;
+      try { await webImportDownloadBackup(); toast(LANG==='zh'?'完整数据库备份已下载':'Full database backup downloaded'); }
+      catch(error) { toast('Export failed: '+error); }
+      return;
+    }
     const body = document.createElement('div');
     body.className = 'form';
     body.innerHTML =
@@ -3992,7 +3995,7 @@
     if (!Array.isArray(info.months)) {
       const file = await webImportPickBackupFile();
       if (!file) return;
-      const ok = await confirmModal(t('bkRestoreTitle') + '：' + file.name + ' ？', t('bkExecute'));
+      const ok = await confirmModal((LANG==='zh'?'整库还原将覆盖销售、客户、库存、销售分组和设置。请先下载当前完整备份。文件：':'Full restore replaces sales, customers, stock, sales groups and settings. Download a current full backup first. File: ') + file.name, t('bkExecute'));
       if (!ok) return;
       let up;
       try { up = await webImportUploadBackupFile(file); } catch (e) { toast('Restore failed: ' + e); return; }
@@ -4298,9 +4301,6 @@
       } catch (e) { S.sheetLayouts = {}; }
     }
     if(meta.prefs && meta.prefs.customerBatchLayouts) {try{S.customerBatchLayouts=JSON.parse(meta.prefs.customerBatchLayouts) || {};}catch(e){}}
-    if (meta.prefs && meta.prefs.userStyles) {
-      try { S.userStyles = JSON.parse(meta.prefs.userStyles) || {}; } catch (e) { S.userStyles = {}; }
-    }
     if (meta.prefs && meta.prefs.salesPageSize !== undefined) {
       S.pageSize = Number(meta.prefs.salesPageSize);
       if (!(S.pageSize >= 0)) S.pageSize = 200;
@@ -4352,7 +4352,7 @@
     } catch (e) { /* ignore */ }
     // 页面可能在 pywebview 宿主里但宿主对象注入稍晚：mock 首渲染延迟 600ms 让位——
     // 桥接在窗口期内注入则只做一次真实渲染，避免 mock+真实两次全量渲染并发卡死主线程。
-    bootRenderTimer = setTimeout(() => { bootRenderTimer = null; applyLocaleAndRender(); }, 600);
+    bootRenderTimer = setTimeout(() => { bootRenderTimer = null; applyLocaleAndRender(); }, 0);
     if (USING_MOCK) {
       const iv = setInterval(() => {
         if (!USING_MOCK) { clearInterval(iv); return; }

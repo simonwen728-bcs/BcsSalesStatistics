@@ -1,3 +1,5 @@
+// BCS_EDITABLE_GROUPS_1
+// BCS_DASHBOARD_DATA_MONTH_1
 // Statistics engine: faithful JS port of google-excel.appScript (V59) reports.
 // Each generator returns a spec: {sheet, values, merges, numFmt, bold, bg, align, widths, freeze}
 window.STATS = (function () {
@@ -69,6 +71,11 @@ window.STATS = (function () {
     if (rg.start && dt < rg.start) return false;
     if (rg.end && dt > rg.end) return false;
     return true;
+  }
+
+  function canonicalSalesGroup(value) {
+    const raw=String(value || '').trim().replace(/\s+/g,' ');
+    return ({house:'House',outside:'Outside','other branch':'Other Branch',ic:'IC'})[raw.toLowerCase()] || raw;
   }
 
   function sales1Groups(reps) {
@@ -255,7 +262,7 @@ window.STATS = (function () {
     (reps.s1 || []).forEach((r) => {
       const s1 = String(r.code || '').trim().toUpperCase();
       const name = String(r.name || '').trim();
-      const group = String(r.group || '').trim();
+      const group = canonicalSalesGroup(r.group);
       if (s1) sales1Info[s1] = { name: name || s1, group: group || (s1 === 'HO' ? 'House' : 'Other Branch') };
     });
     (reps.s2 || []).forEach((r) => {
@@ -298,9 +305,11 @@ window.STATS = (function () {
     });
 
     const sales2List = Array.from(insideSales2).filter((s2) => sales2Totals[s2] !== 0).sort();
-    const groupMap = {};
+    const groupMap = Object.create(null), groupLabels = Object.create(null);
     Object.keys(sales1Amount).forEach((code) => {
-      const g = sales1Info[code].group;
+      const label=canonicalSalesGroup(sales1Info[code].group);
+      const g=label.toUpperCase();
+      if(!groupLabels[g])groupLabels[g]=label;
       if (!groupMap[g]) groupMap[g] = [];
       groupMap[g].push(code);
     });
@@ -327,9 +336,9 @@ window.STATS = (function () {
       const groupTotal = codes.reduce((sum, c) => sum + sales1Amount[c], 0);
       codes.forEach((code) => {
         const amt = sales1Amount[code];
-        leftRows.push([groupName, sales1Info[code].name, amt, groupTotal ? amt / groupTotal : 0, grandSales1 ? amt / grandSales1 : 0]);
+        leftRows.push([groupLabels[groupName], sales1Info[code].name, amt, groupTotal ? amt / groupTotal : 0, grandSales1 ? amt / grandSales1 : 0]);
       });
-      leftRows.push([groupName + ' 小计', '', groupTotal, 1, grandSales1 ? groupTotal / grandSales1 : 0]);
+      leftRows.push([groupLabels[groupName] + ' 小计', '', groupTotal, 1, grandSales1 ? groupTotal / grandSales1 : 0]);
       subtotalRowIdx.push(leftRows.length);
     });
 
@@ -822,7 +831,6 @@ window.STATS = (function () {
   // 「包含 UNIVERSAL」时 UNIVERSAL 仍单独成行、不拆分。
   // ============================================================
   function cabinetColors(data, opts, t) {
-    if(opts.analysis==='sku')return window.SKU_MIX.generate(data,opts,t);
     const rg = range(opts.start, opts.end);
     if (!rg.success) return { error: t('statEmpty').replace('{msg}', rg.message) };
     const includeUniversal = opts.includeUniversal === true;
@@ -1097,9 +1105,11 @@ window.STATS = (function () {
     const period = ['LAST_MONTH', 'THIS_YEAR', 'YTD'].includes(opts.period) ? opts.period : 'ALL';
     const groupMap = sales1Groups(reps || { s1: [], s2: [] });
     const now = new Date();
-    const last = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    let latest='';
+    data.forEach(r=>{const dt=date(r.soldDate);if(dt>latest)latest=dt;});
+    const last = latest ? new Date(Number(latest.slice(0,4)), Number(latest.slice(5,7))-1, 1) : null;
     const monthKeys = [];
-    for (let i = 11; i >= 0; i--) {
+    for (let i = 11; last && i >= 0; i--) {
       const d = new Date(last.getFullYear(), last.getMonth() - i, 1);
       monthKeys.push(d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'));
     }
@@ -1107,14 +1117,12 @@ window.STATS = (function () {
     const dtext = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
     const periods = {
       ALL: { start: '', end: '' },
-      LAST_MONTH: { start: dtext(new Date(now.getFullYear(), now.getMonth() - 1, 1)), end: dtext(new Date(now.getFullYear(), now.getMonth(), 0)) },
+      LAST_MONTH: { start: last ? dtext(last) : '', end: last ? dtext(new Date(last.getFullYear(),last.getMonth()+1,0)) : '' },
       THIS_YEAR: { start: dtext(new Date(now.getFullYear(), 0, 1)), end: dtext(now) },
-      YTD: (() => { const w = ytdWindow(); return { start: w.start, end: w.ytdEndInclusive }; })(),
+      YTD: { start: monthKeys.length ? monthKeys[0]+'-01' : '', end: last ? dtext(new Date(last.getFullYear(),last.getMonth()+1,0)) : '' },
     };
     const rankStats = { ALL: {}, LAST_MONTH: {}, THIS_YEAR: {}, YTD: {} };
     const customers = {};
-    let latest='';
-    data.forEach(r=>{const dt=date(r.soldDate);if(dt>latest)latest=dt;});
     const master=new Map((opts.customers || []).map(c=>[String(c.no || '').trim().toUpperCase(),c]));
     data.forEach((r) => {
       const sales1Code = String(r.rep1 || '').trim().toUpperCase();
@@ -1194,7 +1202,7 @@ window.STATS = (function () {
           return [x.no, x.name, x.totalAmount, s1, s1 === 'HO' ? (customers[x.no].latestOrder?.sales2 || '') : ''];
         });
     });
-    return { period, monthKeys, customers, rankings, periodLabels: { ALL: '全部', LAST_MONTH: '上月', THIS_YEAR: '今年', YTD: 'TTM' } };
+    return { period, monthKeys, customers, rankings, dataEnd: latest, dataMonth: latest.slice(0,7), periods, periodLabels: { ALL: '全部', LAST_MONTH: '上月', THIS_YEAR: '今年', YTD: 'TTM' } };
   }
 
   // ============================================================
