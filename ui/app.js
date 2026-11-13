@@ -2609,11 +2609,9 @@
       { id: 'history', labelKey: 'tabHistory' },
     ] },
     { id: 'g-report', labelKey: 'navReports', icon: '📊', children: STAT_HUBS.map((h) => ({
-      id: 'g-' + h.id, labelKey: h.labelKey, children: h.reports.map((r) => ({ id: 'r:' + r.id, labelKey: r.labelKey })),
+      id: 'g-' + h.id, labelKey: h.labelKey, children: h.reports.flatMap((r) => r.id==='cabinetColors' ? [{ id: 'r:' + r.id, labelKey: r.labelKey },{ id: 'colorDashboard', labelKey: '橱柜颜色动态' }] : [{ id: 'r:' + r.id, labelKey: r.labelKey }]), // BCS_COLOR_TRENDS_1
     })) },
     { id: 'dashboard', labelKey: 'tabDashboard' },
-    // BCS_COLOR_TRENDS_1
-    { id: 'colorDashboard', labelKey: '橱柜颜色动态', icon: '🎨' },
   ];
   function buildSidebar() {
     const sb = $('#sidebar');
