@@ -831,7 +831,7 @@ window.STATS = (function () {
   // 拆到具体颜色；该 Item 没有非 UNIVERSAL 记录时退回全局颜色占比。
   // 「包含 UNIVERSAL」时 UNIVERSAL 仍单独成行、不拆分。
   // ============================================================
-  // BCS_CABINET_MONTHLY_MATRIX_1
+  // BCS_CABINET_MONTHLY_MATRIX_2
   function cabinetColors(data, opts, t) {
     const rg=range(opts.start,opts.end);
     if(!rg.success)return {error:'Invalid date range'};
@@ -840,6 +840,9 @@ window.STATS = (function () {
     let latest='';data.forEach(r=>{const d=date(r.soldDate);if(d>latest)latest=d;});
     const cutoff=opts.end&&opts.end<latest?opts.end:latest;
     if(!cutoff)return {error:'NO_DATA'};
+    const defaultStart=new Date(Date.UTC(+cutoff.slice(0,4),+cutoff.slice(5,7)-12,1)).toISOString().slice(0,10);
+    const useDefault=!opts.start&&!opts.end&&opts.cabinetRangeAll!==true;
+    const intervalStart=useDefault?defaultStart:(opts.start||''),intervalEnd=cutoff;
     const totals=new Map(),colors=new Map(),rank=new Map();
     const add=(map,k,q,a)=>{let v=map.get(k);if(!v){v={qty:0,amount:0,rows:0};map.set(k,v);}v.qty+=q;v.amount+=a;v.rows++;};
     for(const r of data){
@@ -848,15 +851,15 @@ window.STATS = (function () {
       const q=amount(r.qty),a=amount(r.amount),m=d.slice(0,7),y=d.slice(0,4);
       let map=colors.get(c);if(!map){map=new Map();colors.set(c,map);}
       for(const k of [m,y]){add(totals,k,q,a);add(map,k,q,a);}
-      if((!opts.start||d>=opts.start)&&(!opts.end||d<=opts.end))add(rank,c,q,a);
+      if((!intervalStart||d>=intervalStart)&&d<=intervalEnd){add(rank,c,q,a);add(totals,'区间',q,a);add(map,'区间',q,a);}
     }
-    const y=+cutoff.slice(0,4),m=+cutoff.slice(5,7),periods=[];
+    const y=+cutoff.slice(0,4),m=+cutoff.slice(5,7);
+    const periods=['区间',...[...totals.keys()].filter(k=>/^\d{4}$/.test(k)).sort().reverse()];
     for(let back=0;back<12;back++)periods.push(new Date(Date.UTC(y,m-1-back,1)).toISOString().slice(0,7));
-    periods.push(...[...totals.keys()].filter(k=>/^\d{4}$/.test(k)).sort().reverse());
     const names=[...colors.keys()].sort((a,b)=>a==='UNIVERSAL'?1:b==='UNIVERSAL'?-1:(rank.get(b)?.[mode]||0)-(rank.get(a)?.[mode]||0)||a.localeCompare(b));
     if(!names.length)return {error:'NO_DATA'};
     const spec=baseSpec(mode==='amount'?'橱柜颜色金额统计':'橱柜颜色数量统计');
-    spec.cabinetColorMatrix=1;spec.colorMetric=mode;spec.colorPeriods=periods;spec.colorCutoff=cutoff;
+    spec.cabinetColorMatrix=2;spec.colorRangeStart=intervalStart;spec.colorRangeEnd=intervalEnd;spec.colorMetric=mode;spec.colorPeriods=periods;spec.colorCutoff=cutoff;
     spec.values=[['颜色',...periods.flatMap(p=>[p,''])],['',...periods.flatMap(()=>[mode==='amount'?'销售金额':'销售数量','占比'])]];
     names.forEach(c=>spec.values.push([c,...periods.flatMap(p=>{
       const v=colors.get(c).get(p),denom=totals.get(p);
@@ -866,11 +869,11 @@ window.STATS = (function () {
     const n=spec.values.length;
     periods.forEach((p,i)=>{
       const c=2+i*2;
-      spec.numFmt.push({range:rng(3,c,n,c),fmt:mode==='amount'?'#,##0.00':'#,##0.##'});
+      spec.numFmt.push({range:rng(3,c,n,c),fmt:mode==='amount'?'#,##0.00':'#,##0'});
       spec.numFmt.push({range:rng(3,c+1,n,c+1),fmt:'0.00%'});
     });
     spec.freeze={rows:2,cols:1};
-    spec.info='截至 '+cutoff+'；月度倒序12个月，年度倒序；排除IC；'+(include?'包含Universal，单独列于末尾':'直接排除Universal，不分摊')+'。颜色排序区间：'+(opts.start||'最早')+' — '+(opts.end||latest)+'；历史期间按各自总数计算占比。';
+    spec.info='区间：'+(intervalStart||'最早')+' — '+intervalEnd+'；区间 → 年度倒序 → 最近12个月倒序；排除IC；'+(include?'包含Universal，单独列于末尾':'直接排除Universal，不分摊')+'；各期间按对应总数计算占比。';
     return spec;
   }
 

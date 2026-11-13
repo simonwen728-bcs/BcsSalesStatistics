@@ -1472,7 +1472,7 @@
     if(!opts.includes('SLAB'))opts.unshift('SLAB');
     return opts;
   }
-  // BCS_CABINET_MONTHLY_MATRIX_1: fixed style matrix, one setValues call.
+  // BCS_CABINET_MONTHLY_MATRIX_2: fixed style matrix, one setValues call.
   function renderCabinetMonthlyTemplate(spec,sh,values,off){
     const key=String(spec.sheet),nr=values.length,nc=spec.values[0].length,baseline={};
     const money=spec.colorMetric==='amount',last=nr-1;
@@ -1480,15 +1480,15 @@
       const header=r===off||r===off+1,total=r===last,value=c>0&&c%2===1;
       const st={bl:r===0||header||total?1:0,vt:2,ht:r<off?1:header?2:c===0?1:value&&money?3:2};
       if(header)st.bg={rgb:'#d9eaf7'};if(total)st.bg={rgb:'#d9bd8b'};
-      if(r>off+1&&c>0)st.n={pattern:zhFmt(value?(money?'#,##0.00':'#,##0.##'):'0.00%')};
+      if(r>off+1&&c>0)st.n={pattern:zhFmt(value?(money?'#,##0.00':'#,##0'):'0.00%')};
       cleanGeneratedStyle(st);if(r<300)baseline[r+':'+c]=st;
-      return {v:row[c]===undefined?'':row[c],s:st};
+      return {v:row[c]===undefined||row[c]===0?'':row[c],s:st};
     }));
     sh.getMergeData().forEach(r=>r.breakApart());sh.getRange(0,0,nr,nc).setValues(matrix);
     if(off){sh.getRange(0,0,1,nc).merge();if(off>1)sh.getRange(1,0,1,nc).merge();}
     sh.getRange(off,0,2,1).merge();
     for(let c=1;c+1<nc;c+=2)sh.getRange(off,c,1,2).merge();
-    const widths=Array.from({length:nc},(_,c)=>c===0?200:c%2===0?90:money?150:100);
+    const widths=Array.from({length:nc},(_,c)=>c===0?200:c%2===0?80:120);
     widths.forEach((w,c)=>sh.setColumnWidth(c,w));sh.showRows(0,nr);sh.setRowHeights(0,nr,30);
     sh.setFrozenRows(off+2);sh.setFrozenColumns(1);
     S.appliedLayouts[key]={w:widths,h:{},fz:{y:off+2,x:1}};S.appliedStyles[key]=baseline;
@@ -1713,7 +1713,7 @@
     try {
       if (sh.getMaxRows() < need) sh.insertRows(sh.getMaxRows(), need - sh.getMaxRows());
     } catch (e) { /* ignore */ }
-    if(spec.cabinetColorMatrix===1){renderCabinetMonthlyTemplate(spec,sh,values,off);return;}
+    if(spec.cabinetColorMatrix===2){renderCabinetMonthlyTemplate(spec,sh,values,off);return;}
     if(spec.customerTemplate || ['橱柜颜色统计','石材销量统计'].includes(spec.sheet)){renderProductCustomerTemplate(spec,sh,values,off);return;}
     if(spec.salesQueryTemplate) {renderSalesQueryTemplate(spec,sh);return;}
     if (CUSTOMER_BATCH_SHEETS.includes(spec.sheet)) {
@@ -2030,7 +2030,7 @@
     const isProduct=['cabinetColors','stoneSales'].includes(def.id);
     const productRange=JSON.stringify([opts.start || '',opts.end || '',opts.type || 'SLAB',opts.includeUniversal===true,costVisible(),def.id==='cabinetColors'?(opts.mode||'qty'):'']);
     const priorProduct=isProduct ? S.statResults[def.id]:null;
-    const reusableProduct=priorProduct && !priorProduct.saveFailed && priorProduct.productAlgorithm===2 && priorProduct.productRange===productRange && (def.id!=='cabinetColors'||priorProduct.cabinetColorMatrix===1);
+    const reusableProduct=priorProduct && !priorProduct.saveFailed && priorProduct.productAlgorithm===2 && priorProduct.productRange===productRange && (def.id!=='cabinetColors'||priorProduct.cabinetColorMatrix===2);
     const knownProductRevision=reusableProduct ? priorProduct.dataRevision || '':'';
     const priorFast = reusableAnnual ? priorAnnual : reusablePerformance ? priorPerformance : reusableOrders ? priorOrders : reusableCategory ? priorCategory : reusableHistory ? priorHistory : reusableCustomerStats ? priorCustomerStats : reusableBatch ? priorBatch : reusableProduct ? priorProduct : null;
     S.ctxCache = null; // 每次重新生成都读取最新数据，避免把旧缓存保存成新报表。
@@ -2220,13 +2220,13 @@
     try {
       await ensureXlsxLib();
       const ws = XLSX.utils.aoa_to_sheet(spec.values);
-      if(spec.cabinetColorMatrix===1){
+      if(spec.cabinetColorMatrix===2){
         const nc=spec.values[0].length,money=spec.colorMetric==='amount';
         ws['!merges']=[{s:{r:0,c:0},e:{r:1,c:0}}];
         for(let c=1;c+1<nc;c+=2)ws['!merges'].push({s:{r:0,c},e:{r:0,c:c+1}});
-        ws['!cols']=Array.from({length:nc},(_,c)=>({wpx:c===0?200:c%2===0?90:money?150:100}));
+        ws['!cols']=Array.from({length:nc},(_,c)=>({wpx:c===0?200:c%2===0?80:120}));
         for(let r=2;r<spec.values.length;r++)for(let c=1;c<nc;c++){
-          const cell=ws[XLSX.utils.encode_cell({r,c})];if(cell&&cell.t==='n')cell.z=c%2===0?'0.00%':money?'#,##0.00':'#,##0.##';
+          const cell=ws[XLSX.utils.encode_cell({r,c})];if(cell&&cell.t==='n')cell.z=c%2===0?'0.00%;-0.00%;':money?'#,##0.00;-#,##0.00;':'#,##0;-#,##0;';
         }
       }
       if(CUSTOMER_REPORT_WIDTHS_V2[spec.sheet])ws['!cols']=CUSTOMER_REPORT_WIDTHS_V2[spec.sheet].map(w=>({wpx:w}));
@@ -2324,6 +2324,7 @@
     // BCS_CABINET_MONTHLY_MATRIX_1
     if(def.id==='cabinetColors'){
       if(!S.cabinetMatrixReady){S.statOpts[def.id].includeUniversal=false;S.cabinetMatrixReady=true;}
+      if(!S.statOpts[def.id].cabinetRangeVersion && !S.statOpts[def.id].start && !S.statOpts[def.id].end){const r=ttmRange();S.statOpts[def.id].start=r.start;S.statOpts[def.id].end=r.end;}
       const label=document.createElement('label');label.style.cssText='display:inline-flex;align-items:center;gap:5px;margin-right:8px;';
       const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.dataset.k='includeUniversal';checkbox.checked=S.statOpts[def.id].includeUniversal===true;
       label.appendChild(checkbox);label.appendChild(document.createTextNode(LANG==='zh'?'包含 Universal':'Include Universal'));box.appendChild(label);
@@ -2425,7 +2426,7 @@
     }
     const cached = S.statResults[def.id];
     if(def.id==='categoryQuery' && cached && cached.categoryAlgorithm!==2){const mode=(S.statOpts[def.id]||{}).mode||'amount';await runStat(def,Object.assign({},collectStatOpts(def),{mode}),null);return;}
-    if(def.id==='cabinetColors' && cached && cached.cabinetColorMatrix!==1){await runStat(def,Object.assign({},collectStatOpts(def)),null);return;}
+    if(def.id==='cabinetColors' && cached && cached.cabinetColorMatrix!==2){await runStat(def,Object.assign({},collectStatOpts(def)),null);return;}
     if(def.id==='salesAccount' && cached &&
        (cached.openingClock!==2 || cached.openingAsOf!==accountCalendarToday())) {
       await runStat(def,Object.assign({},collectStatOpts(def)),null);return;
@@ -2806,7 +2807,7 @@
     $('#stat-cond-fields').querySelectorAll('[data-k]').forEach((el) => {
       vals[el.dataset.k] = el.type === 'checkbox' ? el.checked : el.value;
     });
-    if(def.id==='cabinetColors')vals.mode=(S.statOpts[def.id]||{}).mode||'qty';
+    if(def.id==='cabinetColors'){vals.mode=(S.statOpts[def.id]||{}).mode||'qty';vals.cabinetRangeVersion=2;vals.cabinetRangeAll=!vals.start&&!vals.end;}
     S.statOpts[def.id] = vals;
     return vals;
   }
