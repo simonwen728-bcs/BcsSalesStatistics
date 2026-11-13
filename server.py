@@ -244,7 +244,10 @@ class Api:
             f = json.loads(filters_json) if filters_json else {}
         except Exception:
             f = {}
+        # BCS_SALES_IC_FILTER_1
         where, params = [], []
+        if f.get("includeIC") is not True:
+            where.append("UPPER(TRIM(COALESCE(rep1,''))) <> 'IC'")
         q = (f.get("q") or "").strip()
         if q:
             like = "%" + q + "%"
@@ -291,19 +294,26 @@ class Api:
                 rows = con.execute(
                     "SELECT * FROM sales " + w + " ORDER BY sold_date DESC, invoice, id LIMIT ? OFFSET ?",
                     params + [limit, offset]).fetchall()
-                # A short first page already gives the exact total; avoid another table scan.
-                if offset == 0 and len(rows) < limit:
-                    total = len(rows)
-                elif filter_key in cache["counts"]:
-                    total = cache["counts"][filter_key]
-                else:
-                    total = con.execute("SELECT COUNT(*) FROM sales " + w, params).fetchone()[0]
-                if len(cache["counts"]) >= 128:
-                    cache["counts"].clear()
-                cache["counts"][filter_key] = total
+                # BCS_SALES_SUMMARY_1
+                summaries = cache.setdefault("summaries", {})
+                if filter_key not in summaries:
+                    aggregate = con.execute(
+                        "SELECT COUNT(*), COALESCE(SUM(qty),0), COALESCE(SUM(amount),0), "
+                        "MAX(amount), MIN(amount) FROM sales " + w, params).fetchone()
+                    count, quantity, amount, maximum, minimum = aggregate
+                    quantity, amount = float(quantity), float(amount)
+                    summary = {"rows": int(count), "quantity": quantity, "amount": amount,
+                               "average": amount / quantity if quantity else None,
+                               "maximum": float(maximum) if maximum is not None else None,
+                               "minimum": float(minimum) if minimum is not None else None}
+                    if len(summaries) >= 128:
+                        summaries.clear()
+                    summaries[filter_key] = summary
+                summary = summaries[filter_key]
+                total = summary["rows"]
                 if cache["groups"] is None:
                     cache["groups"] = get_reps_group_map(con)
-                result = {"total": total, "rows": [enrich_sale(row_to_sale(r), cache["groups"]) for r in rows]}
+                result = {"total": total, "summary": summary, "rows": [enrich_sale(row_to_sale(r), cache["groups"]) for r in rows]}
                 # Bound page-cache memory; full-history queries are deliberately not retained.
                 if limit <= 1000:
                     if len(cache["pages"]) >= 32:
@@ -709,6 +719,37 @@ class Api:
             finally:
                 con.close()
 
+    # BCS_STONE_AVG_COST_1
+    def get_stone_cost_summary(self, start="", end="", product_type="SLAB"):
+        product_type = str(product_type or "SLAB").strip().upper()
+        where, params = ["UPPER(TRIM(type)) = ?"], [product_type]
+        if start:
+            where.append("sold_date >= ?"); params.append(start)
+        if end:
+            where.append("sold_date <= ?"); params.append(end)
+        with DB_LOCK:
+            con = connect()
+            try:
+                groups = get_reps_group_map(con)
+                rows = con.execute("SELECT item_no,rep1,qty,cost FROM sales WHERE " +
+                                   " AND ".join(where), params).fetchall()
+                items, total_cost, total_qty = {}, 0.0, 0.0
+                for row in rows:
+                    code = str(row[1] or "").strip().upper()
+                    item = str(row[0] or "").strip().upper()
+                    if not item or code == "IC" or groups.get(code) == "IC":
+                        continue
+                    qty = float(row[2] or 0)
+                    raw_cost = abs(float(row[3] or 0))
+                    cost = raw_cost * qty if product_type == "SLAB" else raw_cost
+                    acc = items.setdefault(item, [0.0, 0.0])
+                    acc[0] += qty; acc[1] += cost
+                    total_cost += cost; total_qty += qty
+                return {"costByItem": {k: v[1]/v[0] if v[0] else None for k,v in items.items()},
+                        "averageCost": total_cost/total_qty if total_qty else None}
+            finally:
+                con.close()
+
     def get_product_types(self):
         with DB_LOCK:
             con = connect()
@@ -867,10 +908,10 @@ class Api:
                 if q:
                     like = "%" + q + "%"
                     rows = con.execute(
-                        "SELECT * FROM customers WHERE no LIKE ? OR name LIKE ? OR city LIKE ? ORDER BY no",
+                        "SELECT * FROM customers WHERE no LIKE ? OR name LIKE ? OR city LIKE ? ORDER BY COALESCE(TRIM(created),'') DESC, no DESC",
                         (like, like, like)).fetchall()
                 else:
-                    rows = con.execute("SELECT * FROM customers ORDER BY no").fetchall()
+                    rows = con.execute("SELECT * FROM customers ORDER BY COALESCE(TRIM(created),'') DESC, no DESC").fetchall()
             finally:
                 con.close()
         return [row_to_customer(r) for r in rows]
@@ -1438,7 +1479,7 @@ def redact_cost(value):
         rows = value.get('values')
         if isinstance(rows, list) and rows and isinstance(rows[0], list):
             columns = [i for i, h in enumerate(rows[0])
-                       if str(h).strip().lower() in ('cost', '成本')]
+                       if str(h).strip().lower() in ('cost', '成本', '平均成本', 'average cost')]
             if columns:
                 result['values'] = [[v for i, v in enumerate(row) if i not in columns]
                                     for row in rows]
@@ -1578,6 +1619,8 @@ class Handler(BaseHTTPRequestHandler):
                 COST_ATTEMPTS.pop(ip, None)
             return self._json({'ok': True, 'token': token, 'expiresIn': COST_TTL})
         allowed = self._cost_allowed()
+        if method == 'get_stone_cost_summary' and not allowed:
+            return self._json({'error': 'COST_LOCKED'}, 403)
         management_methods = {
             'update_sale', 'apply_sales_import', 'delete_batch', 'list_batches',
             'upsert_customer', 'delete_customer', 'upsert_stock', 'delete_stock',
@@ -1588,9 +1631,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({'error': 'MANAGEMENT_LOCKED'}, 403)
         # History contains privilege-dependent columns. Recompute it from filtered
         # data instead of sharing one saved result between locked/unlocked views.
-        if method == 'load_report' and args and args[0] == 'salesHistory':
+        if method == 'load_report' and args and args[0] in ('salesHistory', 'stoneSales'):
             return self._json({'ok': True, 'report': None})
-        if method == 'save_report' and args and args[0] == 'salesHistory':
+        if method == 'save_report' and args and args[0] in ('salesHistory', 'stoneSales'):
             return self._json({'ok': True})
         try:
             result = fn(*args)
@@ -1603,6 +1646,7 @@ class Handler(BaseHTTPRequestHandler):
         # 兼容前端:python 侧返回 JSON 字符串时自动解析 —— 我们直接返回对象即可
         if method == 'load_reports' and isinstance(result, dict):
             result.get('reports', {}).pop('salesHistory', None)
+            result.get('reports', {}).pop('stoneSales', None)
         self._json((result if allowed else redact_cost(result)) if result is not None else {"ok": True})
 
     def _backup_upload(self):
