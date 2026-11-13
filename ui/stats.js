@@ -1468,7 +1468,7 @@ window.STATS = (function () {
 
   // ============================================================
   // 11) 客户开户统计 (salesAccount) — 对应原 runSalesAccountAnalysis（第12段）
-  // 不受日期影响：系统截止月 = 最新销售日期所在月；
+  // 客户开户统计：截止日为实际今天，最近三个月含本月；
   // Total/年度列/YTD 按开户日期（Customer.created），Sleeping=近3月无购买，Never=从未购买。
   // ============================================================
   function salesAccount(data, opts, t) {
@@ -1489,24 +1489,25 @@ window.STATS = (function () {
     });
     if (!salesMap.size) return { error: 'NO_SALES1' };
     if (!(opts.customers || []).length) return { error: 'NO_CUSTOMERS' };
-    let latest = '';
+    // BCS_ACCOUNT_CALENDAR_1
+    const latest = date(new Date());
+    let salesLatest = '';
     const everPurchased = new Set();
     data.forEach((r) => {
       const dt = date(r.soldDate);
-      if (!dt) return;
-      if (dt > latest) latest = dt;
+      if (!dt || dt > latest) return;
+      if (dt > salesLatest) salesLatest = dt;
       const no = String(r.custNo || '').trim().toUpperCase();
       if (no && isPurchase(r)) everPurchased.add(no);
     });
-    if (!latest) return { error: 'NO_DATA' };
     const sysY = Number(latest.slice(0, 4)), sysM = Number(latest.slice(5, 7));
     const monthStart = (y, m, back) => { const d = new Date(y, m - 1 - back, 1); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-01'; };
-    const recent3Start = monthStart(sysY, sysM, 2);
+    const recent3Start = salesLatest ? monthStart(Number(salesLatest.slice(0,4)), Number(salesLatest.slice(5,7)), 2) : monthStart(sysY, sysM, 2);
     const ytdStart = monthStart(sysY, sysM, 11);
     const recentPurchased = new Set();
     data.forEach((r) => {
       const dt = date(r.soldDate);
-      if (dt && dt >= recent3Start && isPurchase(r)) recentPurchased.add(String(r.custNo || '').trim().toUpperCase());
+      if (dt && dt >= recent3Start && dt <= latest && isPurchase(r)) recentPurchased.add(String(r.custNo || '').trim().toUpperCase());
     });
     const yearsSet = new Set();
     const custs = [];
@@ -1554,7 +1555,7 @@ window.STATS = (function () {
       const d = new Date(sysY, sysM - 1 - back, 1);
       return ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getMonth()] + '-' + String(d.getFullYear()).slice(2);
     });
-    const headers = ['Sales 1', 'Total'].concat(years.map(String)).concat(['YTD']).concat(monthLabels).concat(['Sleeping', 'Never']);
+    const headers = ['Sales 1', 'Total'].concat(years.map(String)).concat(['TTM']).concat(monthLabels).concat(['Sleeping', 'Never']);
     const spec = baseSpec('客户开户统计');
     spec.values.push(headers);
     let prevGroup = '';
@@ -1580,8 +1581,10 @@ window.STATS = (function () {
     spec.bold.push(rng(n, 1, n, cols));
     spec.bg.push({ range: rng(n, 1, n, cols), color: '#d9eaf7' });
     spec.align = [{ range: 'A2:A' + n, horiz: 'left' }, { range: 'B2:' + colL(cols) + n, horiz: 'center' }];
+    spec.openingClock = 2;
+    spec.openingAsOf = latest;
     spec.info = (opts.start || opts.end ? 'Period: ' + (opts.start || '...') + ' - ' + (opts.end || '...') + ' | ' : '')
-      + 'System As Of ' + latest;
+      + 'System As Of ' + latest + ' | Sales Data Through ' + (salesLatest || 'No sales imported');
     return spec;
   }
 

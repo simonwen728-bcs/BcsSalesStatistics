@@ -13,7 +13,7 @@
    UniverSheetsFormulaUiEnUS, UniverSheetsNumfmtUiEnUS */
 (function () {
   'use strict';
-  window.BCS_BUILD="Web V14.2 / 2026-11-01";
+  window.BCS_BUILD="Web v11";
 
   // ================= i18n =================
   let LANG = 'en';
@@ -468,7 +468,7 @@
   }
   function hideCostColumn(spec){
     if(costVisible() || !spec?.values?.length)return spec;
-    const col=spec.values[0].findIndex(h=>/^(cost|成本)$/i.test(String(h).trim()));
+    const col=spec.values[0].findIndex(h=>/^(cost|成本|平均成本|average cost)$/i.test(String(h).trim()));
     if(col>=0)spec.values=spec.values.map(row=>row.filter((_,i)=>i!==col));
     return spec;
   }
@@ -936,11 +936,11 @@
     });
     univer.registerPlugin(UniverRenderEnginePlugin);
     univer.registerPlugin(UniverFormulaEnginePlugin);
-    univer.registerPlugin(UniverUIPlugin, { container: containerId, footer: !['dashListMount', 'dashAnaMount'].includes(containerId) });
+    univer.registerPlugin(UniverUIPlugin, { container: containerId, footer: !['dashListMount', 'dashAnaMount'].includes(containerId), menu: {'sheet.command.toggle-gridlines': {hidden:true, disabled:true}} });
     univer.registerPlugin(UniverDocsPlugin);
     univer.registerPlugin(UniverDocsUIPlugin);
     univer.registerPlugin(UniverSheetsPlugin);
-    univer.registerPlugin(UniverSheetsUIPlugin);
+    univer.registerPlugin(UniverSheetsUIPlugin, {statusBarStatistic:false});
     univer.registerPlugin(UniverSheetsFormulaPlugin);
     univer.registerPlugin(UniverSheetsFormulaUIPlugin);
     univer.registerPlugin(UniverSheetsNumfmtPlugin);
@@ -990,6 +990,10 @@
             let row = null;
             const ar = sh2.getActiveRange && sh2.getActiveRange();
             if (ar && typeof ar.getRow === 'function') row = ar.getRow();
+            if(S.nav==='customers' && row===0 && ar && ar.getHeight()===1 && e.target.tagName==='CANVAS') {
+              sortCustomerHeader(ar.getColumn());
+              return;
+            }
             onSheetCell(row);
           } catch (e) { /* ignore */ }
         }, 0);
@@ -1345,6 +1349,11 @@
   // Default report conventions: identifiers/counts/ratios 100 centered,
   // customer names 300 left, money 150 right, headers centered, row height 30.
   const REPORT_DEFAULT_LAYOUT = Object.freeze({compact:100,customerName:300,money:150,rowHeight:30});
+  // BCS_ACCOUNT_CALENDAR_1
+  function accountCalendarToday() {
+    const d=new Date();
+    return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+  }
   const PURCHASE_STATE_REPORT_IDS=['salesAccount','customerActivity','actDetail','actBySales1','actByCity','actByType','actSleeping','actReact','actNever','actNew'];
   const CUSTOMER_BATCH_IDS=['customerType','salesAccount','actDetail','actBySales1','actByCity','actByType','actSleeping','actReact','actNever','actNew'];
   const CUSTOMER_BATCH_SHEETS=['客户类型统计','客户开户统计','客户活跃统计','活跃-按销售1','活跃-按城市','活跃-按客户类型','沉睡客户','沉睡客户唤醒统计','从未购买','新开户'];
@@ -1360,17 +1369,34 @@
     S.customerBatchSource={key,ctx:result};
     return result;
   }
+  // BCS_CUSTOMER_REPORT_LAYOUT_2
+  const CUSTOMER_REPORT_WIDTHS_V2={
+    '客户活跃统计':[100,400,150,150,100,150,100,100,100],
+    '沉睡客户':[100,400,150,150,100,150,100,100,100],
+    '新开户':[100,400,150,150,100,150,100,100,100],
+    '沉睡客户唤醒统计':[100,400,100,100,100,100,100,100,150]
+  };
+  function customerReportLayoutV2(spec) {
+    if(!spec || !CUSTOMER_REPORT_WIDTHS_V2[spec.sheet] || !spec.values || !spec.values.length)return spec;
+    if(spec.sheet!=='沉睡客户唤醒统计' && spec.values[0].length===10 && /^(Status|状态)$/i.test(String(spec.values[0][9]).trim())) {
+      spec.values=spec.values.map(row=>row.slice(0,9));
+    }
+    spec.widths=CUSTOMER_REPORT_WIDTHS_V2[spec.sheet].map((w,c)=>[c+1,w]);
+    return spec;
+  }
   function renderCustomerBatchTemplate(spec,sh,values,off) {
     const key=String(spec.sheet),nr=values.length,nc=spec.values[0].length;
     const grouped=key.startsWith('活跃-'),type=key==='客户类型统计',account=key==='客户开户统计';
     const sleeping=key==='沉睡客户',react=key==='沉睡客户唤醒统计',never=key==='从未购买',fresh=key==='新开户';
     const widths=Array.from({length:nc},(_,c)=>type ? (c===0?250:200) : account ? (c===0?200:100) : grouped ? (c===0?200:c>=9?150:100) : never ? (c===0?100:c===1?300:120) : react ? (c===1?250:c===8?150:100) : sleeping ? (c===1?250:[2,3,5].includes(c)?150:100) : fresh ? (c===1?300:c===5?150:100) : (c===1?300:[2,5].includes(c)?180:c===0?100:150));
-    const left=type || account || grouped ? [0] : sleeping ? [1,2,3] : [1];
+    const customWidths=CUSTOMER_REPORT_WIDTHS_V2[key];
+    if(customWidths)widths.splice(0,widths.length,...customWidths);
+    const left=type || account || grouped ? [0] : ['客户活跃统计','沉睡客户','新开户'].includes(key) ? [1,2,3] : [1];
     const right=type ? [1] : grouped ? [9,10] : account || never ? [] : react ? [8] : [5];
-    // Version the defaults once; subsequent manual edits remain editable and remembered.
     S.customerBatchLayouts=S.customerBatchLayouts || {};
-    if(!S.customerBatchLayouts[key]) {
-      delete S.userStyles[key];delete S.sheetLayouts[key];S.customerBatchLayouts[key]=1;
+    const layoutVersion=customWidths?4:1;
+    if(!S.customerBatchLayouts[key] || (customWidths && S.customerBatchLayouts[key]!==layoutVersion)) {
+      delete S.userStyles[key];delete S.sheetLayouts[key];S.customerBatchLayouts[key]=layoutVersion;
       trackSave(api('set_pref','customerBatchLayouts',JSON.stringify(S.customerBatchLayouts)));
       trackSave(api('set_pref','sheetLayouts',JSON.stringify(S.sheetLayouts)));
     }
@@ -1386,14 +1412,24 @@
       if(header || total) st.bg={rgb:'#d9eaf7'};
       const f=formats.find(f=>r>=f.r0 && r<=f.r1 && c>=f.c0 && c<=f.c1);if(f) st.n={pattern:f.pattern};
       Object.assign(st,user[r+':'+c] || {});
+      if(account && r>=off && c>0)st.ht=2;
       cleanGeneratedStyle(st);
       if(r<300) baseline[r+':'+c]=st;
       return {v:row[c]===0 || row[c]===undefined?'':row[c],s:st};
     }));
     sh.getMergeData().forEach(r=>r.breakApart());
+    if(customWidths && !react) {
+      const oldRows=(S.sheetExtent && S.sheetExtent[key] || {}).rows || nr;
+      sh.getRange(0,9,Math.min(sh.getMaxRows(),Math.max(nr,oldRows)),1).clearContent();
+    }
     sh.getRange(0,0,nr,nc).setValues(matrix);
     if(off) {sh.getRange(0,0,1,nc).merge();sh.getRange(1,0,1,nc).merge();}
-    widths.forEach((w,c)=>{if(lay.w && lay.w[c]>0) widths[c]=lay.w[c];sh.setColumnWidth(c,widths[c]);});
+    // BCS_ACCOUNT_FIXED_LAYOUT_1
+    widths.forEach((w,c)=>{
+      if(account)widths[c]=c===0?200:100;
+      else if(lay.w && lay.w[c]>0)widths[c]=lay.w[c];
+      sh.setColumnWidth(c,widths[c]);
+    });
     sh.showRows(0,nr);sh.setRowHeights(0,nr,30);
     const heights={};Object.entries(lay.h || {}).forEach(([r,h])=>{if(+r<nr && h>=10){sh.setRowHeight(+r,h);heights[r]=h;}});
     const fz=lay.fz || {y:off+1,x:grouped?1:0};sh.setFrozenRows(fz.y || 0);sh.setFrozenColumns(fz.x || 0);
@@ -1439,8 +1475,8 @@
   function renderProductCustomerTemplate(spec,sh,values,off) {
     const customer=!!spec.customerTemplate,cab=spec.sheet==='橱柜颜色统计';
     const key=String(spec.sheet),nr=values.length,nc=spec.values[0].length,baseline={};
-    const widths=customer?[100,300,100,150,150,100,150,250,250,400]:cab?[200,120,120,180,120]:[100,100,300,100,100,180,100,100];
-    const left=customer?[1,3,4,7,8,9]:cab?[0]:[2],right=customer?[]:cab?[3]:[5];
+    const widths=customer?[100,300,100,150,150,100,150,250,250,400]:cab?[200,120,120,180,120]:[100,100,300,100,100,180,100,100,100];
+    const left=customer?[1,3,4,7,8,9]:cab?[0]:[2],right=customer?[]:cab?[3]:[5,7,8];
     const formats=[];const col=v=>[...v].reduce((a,c)=>a*26+c.charCodeAt(0)-64,0)-1;
     (spec.numFmt || []).forEach(f=>{const m=/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/.exec(f.range);if(m)formats.push({r0:+m[2]-1+off,r1:+m[4]-1+off,c0:col(m[1]),c1:col(m[3]),pattern:zhFmt(f.fmt)});});
     const matrix=values.map((row,r)=>Array.from({length:nc},(_,c)=>{
@@ -1561,6 +1597,7 @@
   }
 
   async function renderSpecInnerBody(spec) {
+    customerReportLayoutV2(spec);
     hideCostColumn(spec);
     placeMount();
     // 每个功能拥有自己的工作表：按 spec.sheet 找表（无则新建），原地清空重写，不影响其他功能的表
@@ -1594,7 +1631,7 @@
         // 快照建表带 rowCount/columnCount：数万行表 50ms 级建好（insertRows 扩行是分钟级，已弃用）
         await S.u.api.executeCommand('sheet.command.insert-sheet', {
           unitId: wb.getId(),
-          sheet: { id: newId, name,
+          sheet: { id: newId, name, showGridlines:1,
                    rowCount: Math.max(need + 50, 1000), columnCount: Math.max(ncPreview(spec) + 4, 26) },
         });
       } catch (e) { /* ignore */ }
@@ -1960,14 +1997,14 @@
     const priorCustomerStats=def.id==='customerStats' ? S.statResults[def.id] : null;
     const reusableCustomerStats=priorCustomerStats && !priorCustomerStats.saveFailed && priorCustomerStats.customerStatsAlgorithm===1 && priorCustomerStats.customerStatsRange===customerStatsRange;
     const knownCustomerStatsRevision=reusableCustomerStats ? priorCustomerStats.dataRevision || '' : '';
-    const batchRange=JSON.stringify([opts.start || '',opts.end || '',opts.fCust || '',opts.fSales || '',opts.fCity || '']);
+    const batchRange=JSON.stringify([opts.start || '',opts.end || '',opts.fCust || '',opts.fSales || '',opts.fCity || '',def.id==='salesAccount'?accountCalendarToday():'']);
     const priorBatch=CUSTOMER_BATCH_IDS.includes(def.id) ? S.statResults[def.id] : null;
-    const reusableBatch=priorBatch && !priorBatch.saveFailed && priorBatch.customerBatchAlgorithm===1 && (!PURCHASE_STATE_REPORT_IDS.includes(def.id) || priorBatch.purchaseRuleVersion===1) && priorBatch.customerBatchRange===batchRange;
+    const reusableBatch=priorBatch && !priorBatch.saveFailed && priorBatch.customerBatchAlgorithm===1 && (!PURCHASE_STATE_REPORT_IDS.includes(def.id) || priorBatch.purchaseRuleVersion===1) && priorBatch.customerBatchRange===batchRange && (def.id!=='salesAccount' || (priorBatch.openingClock===2 && priorBatch.openingAsOf===accountCalendarToday()));
     const knownBatchRevision=reusableBatch ? priorBatch.dataRevision || '' : '';
     const isProduct=['cabinetColors','stoneSales'].includes(def.id);
-    const productRange=JSON.stringify([opts.start || '',opts.end || '',opts.type || 'SLAB',opts.includeUniversal===true]);
+    const productRange=JSON.stringify([opts.start || '',opts.end || '',opts.type || 'SLAB',opts.includeUniversal===true,costVisible()]);
     const priorProduct=isProduct ? S.statResults[def.id]:null;
-    const reusableProduct=priorProduct && !priorProduct.saveFailed && priorProduct.productAlgorithm===1 && priorProduct.productRange===productRange;
+    const reusableProduct=priorProduct && !priorProduct.saveFailed && priorProduct.productAlgorithm===2 && priorProduct.productRange===productRange;
     const knownProductRevision=reusableProduct ? priorProduct.dataRevision || '':'';
     const priorFast = reusableAnnual ? priorAnnual : reusablePerformance ? priorPerformance : reusableOrders ? priorOrders : reusableCategory ? priorCategory : reusableHistory ? priorHistory : reusableCustomerStats ? priorCustomerStats : reusableBatch ? priorBatch : reusableProduct ? priorProduct : null;
     S.ctxCache = null; // 每次重新生成都读取最新数据，避免把旧缓存保存成新报表。
@@ -2000,7 +2037,7 @@
       toast(LANG === 'zh' ? '数据未变化，已显示保存的报表。' : 'Data unchanged. Showing saved report.');
       return;
     }
-    if (!ctx || !ctx.sales || !ctx.sales.length) {
+    if ((!ctx || !ctx.sales || !ctx.sales.length) && !(def.id==='salesAccount' && ctx && ctx.customers && ctx.customers.length)) {
       if (def.id === 'salesHistory' && [opts.custNo,opts.itemNo,opts.invoice,opts.sales].some(v=>String(v || '').trim())) {
         toast(LANG === 'zh' ? '没有符合这些条件的销售记录。' : 'No sales records match these filters.');
         return;
@@ -2016,6 +2053,24 @@
       return;
     }
     const spec = STATS[def.id](ctx.sales, Object.assign({}, opts, { reps: ctx.reps, stock: ctx.stock, customers: ctx.customers }), t);
+    if (def.id === 'stoneSales' && costVisible() && spec && !spec.error) {
+      const costs = await api(
+        'get_stone_cost_summary',
+        opts.start || '', opts.end || '', opts.type || 'SLAB'
+      );
+      if (!costVisible()) throw new Error('成本权限已过期，请重新解锁');
+      spec.values[0].push(LANG === 'zh' ? '平均成本' : 'Average Cost');
+      const last = spec.values.length-1;
+      for(let r=1;r<=last;r++) {
+        const key = String(spec.values[r][1] || '').trim().toUpperCase();
+        const value = r === last ? costs.averageCost : costs.costByItem[key];
+        spec.values[r].push(value == null ? '' : value);
+      }
+      spec.numFmt.push({range:'I2:I'+spec.values.length,fmt:'#,##0.00'});
+      spec.align.push({range:'I2:I'+spec.values.length,horiz:'right'});
+      spec.widths.push([9,110]);
+    }
+
     hideCostColumn(spec);
     const pf2 = performance.now();
     if (!spec || spec.error) {
@@ -2057,7 +2112,7 @@
       spec.annualAlgorithm = 2;
     }
     if(PURCHASE_STATE_REPORT_IDS.includes(def.id))spec.purchaseRuleVersion=1;
-    if(isProduct){spec.dataRevision=revision;spec.productRange=productRange;spec.productAlgorithm=1;}
+    if(isProduct){spec.dataRevision=revision;spec.productRange=productRange;spec.productAlgorithm=2;}
     if (CUSTOMER_BATCH_IDS.includes(def.id)) {
       spec.dataRevision=revision;spec.customerBatchRange=batchRange;spec.customerBatchAlgorithm=1;
     }
@@ -2119,6 +2174,7 @@
     const wrap = $('#stat-extra');
     if (!wrap) return;
     const spec = S.statResults[def.id];
+    customerReportLayoutV2(spec);
     if (!spec || !spec.summary || !spec.summary.length) { wrap.innerHTML = ''; return; }
     wrap.innerHTML = '<div class="stat-summary">' + spec.summary.map(([k, v]) =>
       '<span class="chip"><b>' + esc(k) + '</b> ' + (typeof v === 'number' && !Number.isInteger(v) && v <= 1 ? (v * 100).toFixed(1) + '%' : esc(v)) + '</span>').join('') + '</div>';
@@ -2138,12 +2194,34 @@
     try {
       await ensureXlsxLib();
       const ws = XLSX.utils.aoa_to_sheet(spec.values);
+      if(CUSTOMER_REPORT_WIDTHS_V2[spec.sheet])ws['!cols']=CUSTOMER_REPORT_WIDTHS_V2[spec.sheet].map(w=>({wpx:w}));
       if(spec.yearGroups){
-        ws['!merges']=(spec.merges || []).map((m)=>({s:{r:0,c:m.startColumn},e:{r:0,c:m.endColumn}}));
-        ws['!cols']=spec.values[0].map((_,c)=>({wch:c===0?16:c>=5&&c%2===1?13:20,hidden:c===1||c===2}));
-        for(let r=1;r<spec.values.length;r++) for(let c=1;c<spec.values[0].length;c++){
-          const cell=ws[XLSX.utils.encode_cell({r,c})];
-          if(cell&&cell.t==='n') cell.z=c>=5&&c%2===1?'0.00%':'#,##0.00';
+        ws['!merges']=(spec.merges || []).map((m)=>({
+          s:{r:0,c:m.startColumn},e:{r:0,c:m.endColumn}
+        }));
+        ws['!cols']=spec.values[0].map((_,c)=>({
+          wch:c===0?16:c>=5&&c%2===1?13:20,
+          hidden:c===1||c===2
+        }));
+        for(let r=1;r<spec.values.length;r++){
+          for(let c=1;c<spec.values[0].length;c++){
+            const cell=ws[XLSX.utils.encode_cell({r,c})];
+            if(cell&&cell.t==='n'){
+              cell.z=c>=5&&c%2===1?'0.00%':'#,##0.00';
+            }
+          }
+        }
+      }
+
+      if(def.id === 'stoneSales') {
+        ws['!cols'] = (ws['!cols'] || []);
+        ws['!cols'][7] = {wch:14};
+        if(spec.values[0].length > 8) ws['!cols'][8] = {wch:14};
+        for(let r=1;r<spec.values.length;r++) {
+          for(let c=7;c<spec.values[0].length;c++) {
+            const cell=ws[XLSX.utils.encode_cell({r,c})];
+            if(cell && cell.t === 'n') cell.z='#,##0.00';
+          }
         }
       }
       const wb = XLSX.utils.book_new();
@@ -2304,6 +2382,10 @@
       await runStat(def,Object.assign({},collectStatOpts(def)),null);return;
     }
     const cached = S.statResults[def.id];
+    if(def.id==='salesAccount' && cached &&
+       (cached.openingClock!==2 || cached.openingAsOf!==accountCalendarToday())) {
+      await runStat(def,Object.assign({},collectStatOpts(def)),null);return;
+    }
     // Upgrade saved reports on first open; never display old zero-amount status results.
     if(cached && PURCHASE_STATE_REPORT_IDS.includes(def.id) && cached.purchaseRuleVersion!==1){
       await runStat(def,Object.assign({},collectStatOpts(def)),null);return;
@@ -2432,7 +2514,7 @@
     brand.className = 'brand';
     brand.textContent = '📊 ' + t('appName');
     const version=document.createElement('span');
-    version.textContent='V14.2';
+    version.textContent='V14';
     version.style.cssText='font-size:11px;font-weight:400;color:#a7b8d0;margin-left:7px';
     brand.appendChild(version);
     const spacer = document.createElement('div');
@@ -2530,6 +2612,8 @@
       id: 'g-' + h.id, labelKey: h.labelKey, children: h.reports.map((r) => ({ id: 'r:' + r.id, labelKey: r.labelKey })),
     })) },
     { id: 'dashboard', labelKey: 'tabDashboard' },
+    // BCS_COLOR_TRENDS_1
+    { id: 'colorDashboard', labelKey: '橱柜颜色动态', icon: '🎨' },
   ];
   function buildSidebar() {
     const sb = $('#sidebar');
@@ -2609,11 +2693,12 @@
       id = 'r:' + (hub && hub.reports[0] ? hub.reports[0].id : 'salesPerformance');
     }
     S.nav = id;
+    document.getElementById('sales-query-summary').style.display = id === 'sales' && hasSalesSummaryFilter() ? 'flex' : 'none';
     const isReport = id.startsWith('r:');
     const isData = ['sales', 'customers', 'inventory', 'reps', 'history'].includes(id);
     const isDash = id === 'dashboard';
     document.querySelectorAll('.page').forEach((p) => (p.style.display = 'none'));
-    const page = document.getElementById(isDash ? 'page-dashboard' : 'page-sheet');
+    const page = document.getElementById(id==='colorDashboard' ? 'page-color-dashboard' : isDash ? 'page-dashboard' : 'page-sheet');
     if (page) page.style.display = 'flex';
     ['wb-sales', 'wb-customers', 'wb-inventory', 'wb-reps', 'wb-history', 'wb-stat'].forEach((wb) => {
       const el = document.getElementById(wb);
@@ -2621,6 +2706,11 @@
     });
     const um = document.getElementById('univerMount');
     if (um) um.style.display = 'block';   // 导入记录页会隐藏工作表，离开时务必恢复
+    if(id==='colorDashboard'){
+      if(um)um.style.display='none';
+      window.BCSColorTrends.show({api,normalize:normalizeCtx,token:()=>S.dataToken,lang:()=>LANG});
+      buildSidebar();return;
+    }
     if (isDash) {
       renderDashboard();   // 客户动态用两块独立 Excel 面板（懒加载引擎），不用主画布
       buildSidebar();
@@ -3200,10 +3290,49 @@
     else if (ctx.kind === 'reps') { enable('reps-edit'); enable('reps-del'); }
   }
 
+  // BCS_SALES_SUMMARY_1
+
+  // BCS_FIXED_GRID_SUMMARY_1
+  function hasSalesSummaryFilter() {
+    const f = S.salesFilters || {};
+    const keys = ['q','start','end','custNo','custName','itemNo','description','type','color','invoice','rep1'];
+    return keys.some(k => String(f[k] || '').trim()) || f.includeIC === true;
+  }
+  function showSalesSummary(summary) {
+    const el = document.getElementById('sales-query-summary');
+    el.style.display = S.nav === 'sales' && hasSalesSummaryFilter() ? 'flex' : 'none';
+    if (!hasSalesSummaryFilter()) { el.textContent = ''; return; }
+
+    if (!summary) {
+      el.textContent = LANG === 'zh' ? '查询汇总暂不可用' : 'Query totals unavailable';
+      return;
+    }
+    const money = (v) => v == null ? '—' : Number(v).toLocaleString('en-US', {
+      minimumFractionDigits:2, maximumFractionDigits:2
+    });
+    const qty = Number(summary.quantity).toLocaleString('en-US', {
+      maximumFractionDigits:6
+    });
+    const labels = LANG === 'zh'
+      ? ['全部查询结果', '总片数', '总金额', '平均单价', '最大行金额', '最小行金额', '数据行数']
+      : ['All matching records', 'Total quantity', 'Total amount', 'Average unit price', 'Max row amount', 'Min row amount', 'Rows'];
+    const values = [
+      qty, money(summary.amount), money(summary.average),
+      money(summary.maximum), money(summary.minimum),
+      Number(summary.rows).toLocaleString('en-US')
+    ];
+    el.textContent = labels[0] + '：  ' +
+      values.map((v,i) => labels[i+1] + ': ' + v).join('   |   ');
+    el.title = LANG === 'zh'
+      ? '平均单价 = 总金额 ÷ 总片数；退货按负数扣减。汇总与选中单元格无关。'
+      : 'Average unit price = total amount / total quantity. Returns are deducted.';
+  }
   let salesToken = 0;
   async function renderSales(force=false) {
 
     const token = ++salesToken;
+    if (force) document.getElementById('sales-query-summary').textContent =
+      LANG === 'zh' ? '正在计算查询汇总…' : 'Calculating query totals…';
     const all = !S.pageSize;   // pageSize=0 = 加载全部
     const tk = 'sales:' + S.dataToken + ':' + JSON.stringify(S.salesFilters) + ':' + S.salesPage + ':' + (all ? 'all' : S.pageSize);
     if (!force && await activateIfFresh(t('tabSales'), tk)) { S.sheetCtx = S.sheetCtxCache[t('tabSales')] || null; return; }
@@ -3214,6 +3343,7 @@
     } catch (e) { toast('Load error: ' + (e && e.message ? e.message : e)); return; }
     if (token !== salesToken) return;
     if (!res || !Array.isArray(res.rows)) { toast('Load error: bad response'); return; }
+    showSalesSummary(res.summary);
     const pages = all ? 1 : Math.max(1, Math.ceil(res.total / S.pageSize));
     if (!all && S.salesPage >= pages) {S.salesPage=pages-1;return renderSales(true);}
     const start = all ? 0 : S.salesPage * S.pageSize;
@@ -3272,15 +3402,46 @@
 
   // ================= customers page =================
   const CUST_COLS = [['no', 'custNo'], ['name', 'custName'], ['sales1', 'colRep1'], ['created', 'custCreated'], ['city', 'colCity'], ['state', 'colState'], ['phone', 'colPhone'], ['contact', 'colContact'], ['type', 'colCustType'], ['email', 'colEmail']];
+  // BCS_CUSTOMER_SORT_1
+  function customerSortState() {
+    return S.customerSort || (S.customerSort={field:'created',dir:-1});
+  }
+  function sortCustomerRows(list) {
+    const state=customerSortState();
+    const compare=(a,b)=>String(a).localeCompare(String(b),LANG==='zh'?'zh-CN':'en',{numeric:true,sensitivity:'base'});
+    return list.slice().sort((a,b)=>{
+      const x=String(a[state.field] || '').trim(), y=String(b[state.field] || '').trim();
+      if(!x || !y) return x ? -1 : y ? 1 : compare(a.no || '',b.no || '')*state.dir;
+      return (compare(x,y) || compare(a.no || '',b.no || ''))*state.dir;
+    });
+  }
+  function customerSortHeader(key,label) {
+    if(!['name','created','city'].includes(key))return label;
+    const state=customerSortState();
+    return label+(state.field===key ? (state.dir===1?' ▲':' ▼') : ' ↕');
+  }
+  let lastCustomerSortClick=0;
+  function sortCustomerHeader(column) {
+    const field={1:'name',3:'created',4:'city'}[column];
+    if(!field)return;
+    const now=performance.now();
+    if(now-lastCustomerSortClick<180)return;
+    lastCustomerSortClick=now;
+    const state=customerSortState();
+    S.customerSort={field,dir:state.field===field ? -state.dir : field==='created' ? -1 : 1};
+    S.sheetSel=-1; S.sheetCtx=null;
+    ['cust-edit','cust-del'].forEach(id=>{const b=document.getElementById(id);if(b)b.disabled=true;});
+    renderCustomers().catch(e=>toast('Load error: '+e.message));
+  }
   let customerQueryToken=0;
   async function renderCustomers() {
     const queryToken=++customerQueryToken;
-    const tk = 'cust:' + S.dataToken + ':' + (S.custQuery || '');
+    const tk = 'cust:' + S.dataToken + ':' + (S.custQuery || '') + ':' + JSON.stringify(customerSortState());
     if (await activateIfFresh(t('tabCustomers'), tk)) { S.sheetCtx = S.sheetCtxCache[t('tabCustomers')] || null; return; }
-    const list = await api('get_all_customers', S.custQuery);
+    const list = sortCustomerRows(await api('get_all_customers', S.custQuery));
     if(queryToken!==customerQueryToken)return;
     $('#cust-count').textContent = list.length ? String(list.length) : '';
-    const values = [CUST_COLS.map(([, lk]) => t(lk))];
+    const values = [CUST_COLS.map(([key, lk]) => customerSortHeader(key,t(lk)))];
     list.slice(0, 5000).forEach((r) => values.push(CUST_COLS.map(([k]) => (r[k] === null || r[k] === undefined ? '' : r[k]))));
     S.sheetCtx = { kind: 'customers', rows: list.slice(0, 5000), startRow: 1, colCount: CUST_COLS.length };
     S.sheetCtxCache[t('tabCustomers')] = S.sheetCtx;
@@ -3953,7 +4114,7 @@
     // The remote endpoint exports a full database. Do not offer ignored filters.
     if (!BRIDGE || !BRIDGE.export_backup) {
       const message = LANG==='zh'
-        ? '下载完整数据库备份？包含销售、客户、库存、销售分组和设置。还原此文件会覆盖这些数据，不能只还原某个分组。'
+        ? '下载完整数据库备份？包含销售、客户、库存、销售分组和设置。网页版还原此文件会覆盖这些数据，不能只还原某个分组。'
         : 'Download a full database backup? It contains sales, customers, stock, sales groups and settings. Web restore replaces all these tables; it cannot restore just one group.';
       if (!await confirmModal(message, LANG==='zh'?'下载完整备份':'Download Full Backup')) return;
       try { await webImportDownloadBackup(); toast(LANG==='zh'?'完整数据库备份已下载':'Full database backup downloaded'); }
@@ -4126,6 +4287,7 @@
       color: $('#f-color').value || '',
       invoice: $('#f-inv').value || '',
       rep1: $('#f-rep1').value || '',
+      includeIC: !!$('#f-include-ic').checked,
     };
   }
   const SALES_FILTER_INPUTS = ['f-start', 'f-end', 'f-custname', 'f-itemno', 'f-desc', 'f-type', 'f-color', 'f-inv', 'f-rep1'];
@@ -4144,7 +4306,9 @@
     attachFuzzy(itemInput, {fetch: fuzzyItems,
       onPick: (it, input) => { input.dataset.itemNo = it.v; }
     });
-    itemInput.addEventListener('input', () => { delete itemInput.dataset.itemNo; });
+    itemInput.addEventListener('input', () => {
+      delete itemInput.dataset.itemNo;
+    });
     attachFuzzy($('#f-desc'), { fetch: fuzzyDescs });
     attachFuzzy($('#f-type'), { fetch: (text) => getLookup().then((lk) => fuzzySimple(lk.types, text)) });
     attachFuzzy($('#f-color'), { fetch: (text) => getLookup().then((lk) => fuzzySimple(lk.colors, text)) });
@@ -4153,7 +4317,13 @@
   }
   function bindToolbars() {
     $('#sales-query').onclick = () => { collectSalesFilters(); S.salesPage = 0; renderSales(true); };
+    $('#f-include-ic').onchange = () => {
+      collectSalesFilters();
+      S.salesPage = 0;
+      renderSales(true);
+    };
     $('#sales-reset').onclick = () => {
+      $('#f-include-ic').checked = false;
       SALES_FILTER_INPUTS.forEach((id) => { $('#' + id).value = ''; });
       delete $('#f-custname').dataset.custNo;
       delete $('#f-itemno').dataset.itemNo;
