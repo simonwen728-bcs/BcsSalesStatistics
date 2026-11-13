@@ -1,4 +1,4 @@
-/* BCS_COLOR_TRENDS_1 — fixed native tables; no spreadsheet style replay. */
+/* BCS_COLOR_TRENDS_5_ALIGN; BCS_COLOR_TRENDS_4_WIDTHS; BCS_COLOR_TRENDS_3_CHARTS; BCS_COLOR_TRENDS_2_SUMMARY; BCS_COLOR_TRENDS_1 — fixed native tables; no spreadsheet style replay. */
 (function(){
 'use strict';
 const empty=()=>({qty:0,amount:0,rows:0});
@@ -28,25 +28,37 @@ function compute(sales,reps,opts){
  return {latest,cutoff,total,list,colors,months,years,monthKeys,metrics};
 }
 function detail(data,name){
- const c=data.colors.get(name);if(!c)return {years:[],months:[]};
+ const c=data.colors.get(name);
+ const yearKeys=[...data.years.keys()].sort();
  const line=(k,map,denom)=>({period:k,...data.metrics(map.get(k)||empty(),denom.get(k)||empty())});
- return {years:[...data.years.keys()].sort().map(k=>line(k,c.years,data.years)),months:data.monthKeys.map(k=>line(k,c.months,data.months))};
+ const aggregate=(keys,map,denom)=>{
+  const value=empty(),base=empty();
+  for(const k of keys){
+   const v=map.get(k)||empty(),b=denom.get(k)||empty();
+   value.qty+=v.qty;value.amount+=v.amount;value.rows+=v.rows;
+   base.qty+=b.qty;base.amount+=b.amount;base.rows+=b.rows;
+  }
+  return data.metrics(value,base);
+ };
+ if(!c)return {years:[],months:[],yearTotal:data.metrics(empty(),empty()),monthTotal:data.metrics(empty(),empty())};
+ return {years:yearKeys.map(k=>line(k,c.years,data.years)),months:data.monthKeys.map(k=>line(k,c.months,data.months)),
+  yearTotal:aggregate(yearKeys,c.years,data.years),monthTotal:aggregate(data.monthKeys,c.months,data.months)};
 }
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let cfg,host,ctx=null,revision='',ctxToken,seq=0,data,selected='',chart,observer;
+let cfg,host,ctx=null,revision='',ctxToken,seq=0,data,selected='',charts={},observer;
 const $=id=>host.querySelector('#ct-'+id),zh=()=>cfg.lang()==='zh',text=(a,b)=>zh()?a:b;
 const fmt=(n,kind)=>n==null?'—':kind==='pct'?(n*100).toFixed(2)+'%':Number(n).toLocaleString('en-US',{minimumFractionDigits:kind==='money'?2:0,maximumFractionDigits:2});
 const cols=(first)=>[first,text('销售数量','Quantity'),text('数量占比','Quantity %'),text('销售金额','Sales Amount'),text('金额占比','Amount %')];
-function table(headers,rows,foot){
+function table(headers,rows,foot,widths=[14,19,18,31,18]){
  const head='<thead><tr>'+headers.map(h=>'<th>'+esc(h)+'</th>').join('')+'</tr></thead>';
- const cells=r=>r.map((v,i)=>'<td'+(i?' class="ct-n"':'')+'>'+esc(v)+'</td>').join('');
- return '<table><colgroup><col style="width:38%">'+Array(4).fill('<col style="width:15.5%">').join('')+'</colgroup>'+head+'<tbody>'+rows.map(r=>'<tr>'+cells(r)+'</tr>').join('')+'</tbody>'+(foot?'<tfoot><tr>'+cells(foot)+'</tr></tfoot>':'')+'</table>';
+ const cells=r=>r.map((v,i)=>'<td title="'+esc(v)+'"'+(i===3?' class="ct-money"':i>0?' class="ct-center"':'')+'>'+esc(v)+'</td>').join('');
+ return '<table><colgroup>'+widths.map(w=>'<col style="width:'+w+'%">').join('')+'</colgroup>'+head+'<tbody>'+rows.map(r=>'<tr>'+cells(r)+'</tr>').join('')+'</tbody>'+(foot?'<tfoot><tr>'+cells(foot)+'</tr></tfoot>':'')+'</table>';
 }
 const row=r=>[r.period??r.name,fmt(r.qty),fmt(r.qtyShare,'pct'),fmt(r.amount,'money'),fmt(r.amountShare,'pct')];
 function drawList(){
  const search=key($('search').value),list=data.list.filter(r=>r.name.includes(search));
  const total=data.metrics(data.total,data.total);
- $('list').innerHTML=table(cols(text('颜色','Color')),list.map(row),[text('合计','Total'),...row(total).slice(1)]);
+ $('list').innerHTML=table(cols(text('颜色','Color')),list.map(row),[text('合计','Total'),...row(total).slice(1)],[34,13,14,25,14]);
  $('list').querySelectorAll('tbody tr').forEach((tr,i)=>{
   const name=list[i].name;tr.classList.toggle('ct-selected',name===selected);tr.tabIndex=0;tr.setAttribute('aria-selected',String(name===selected));
   tr.onclick=()=>{selected=name;drawList();drawDetail();};tr.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();tr.click();}};
@@ -55,12 +67,29 @@ function drawList(){
 }
 function drawDetail(){
  const d=detail(data,selected);$('selected').textContent=selected||text('请选择颜色','Select a color');
- $('years').innerHTML=table(cols(text('年份','Year')),d.years.map(row));
- $('months').innerHTML=table(cols(text('月份','Month')),d.months.map(row));
- $('chart-title').textContent=text('最近12个月占比趋势','Share trend — last 12 months')+' · '+selected;
- if(!window.echarts){$('chart').textContent=text('图表组件未加载，请刷新页面','Chart unavailable; refresh the page');return;}
- if(!chart)chart=window.echarts.init($('chart'));
- chart.setOption({animation:false,tooltip:{trigger:'axis',valueFormatter:v=>fmt(v,'pct')},legend:{top:4},grid:{left:15,right:20,top:40,bottom:10,containLabel:true},xAxis:{type:'category',boundaryGap:false,data:data.monthKeys,axisLabel:{rotate:35}},yAxis:{type:'value',axisLabel:{formatter:v=>(v*100).toFixed(0)+'%'}},series:[['qtyShare',text('数量占比','Quantity %'),'#2456a6'],['amountShare',text('金额占比','Amount %'),'#e6a23c']].map(([k,name,color])=>({name,type:'line',connectNulls:false,symbol:'circle',symbolSize:5,lineStyle:{width:2},itemStyle:{color},data:d.months.map(r=>r[k])}))},true);chart.resize();
+ const pad=rows=>rows.concat(Array.from({length:Math.max(0,12-rows.length)},()=>['','','','','']));
+ const totalRow=v=>[text('合计','Total'),...row(v).slice(1)];
+ $('years').innerHTML=table(cols(text('年份','Year')),pad(d.years.map(row)),totalRow(d.yearTotal));
+ $('months').innerHTML=table(cols(text('月份','Month')),pad(d.months.map(row)),totalRow(d.monthTotal));
+ const plots=[
+  {id:'qty',field:'qty',share:'qtyShare',name:text('销售数量','Quantity'),shareName:text('数量占比','Quantity %'),title:text('最近12个月销售数量','Quantity — last 12 months'),color:'#2456a6',shareColor:'#67a3e8',money:false},
+  {id:'amount',field:'amount',share:'amountShare',name:text('销售金额','Sales Amount'),shareName:text('金额占比','Amount %'),title:text('最近12个月销售金额','Sales amount — last 12 months'),color:'#dc921f',shareColor:'#f0b65e',money:true}
+ ];
+ for(const p of plots){
+  $('chart-'+p.id+'-title').textContent=p.title+' · '+selected;
+  const el=$('chart-'+p.id);
+  if(!window.echarts){el.textContent=text('图表组件未加载，请刷新页面','Chart unavailable; refresh the page');continue;}
+  const chart=charts[p.id]||(charts[p.id]=window.echarts.init(el));
+  chart.setOption({animation:false,tooltip:{trigger:'axis'},legend:{top:4},grid:{left:12,right:12,top:55,bottom:10,containLabel:true},
+   xAxis:{type:'category',boundaryGap:false,data:data.monthKeys,axisLabel:{rotate:40}},
+   yAxis:[{type:'value',name:p.name,axisLabel:{formatter:v=>Number(v).toLocaleString('en-US')},nameTextStyle:{fontSize:11}},
+    {type:'value',name:p.shareName,axisLabel:{formatter:v=>(v*100).toFixed(0)+'%'},splitLine:{show:false},nameTextStyle:{fontSize:11}}],
+   series:[
+    {name:p.name,type:'line',yAxisIndex:0,connectNulls:false,symbol:'circle',symbolSize:5,lineStyle:{width:2},itemStyle:{color:p.color},tooltip:{valueFormatter:v=>fmt(v,p.money?'money':'qty')},data:d.months.map(r=>(r.rows||r.qtyShare!=null||r.amountShare!=null)?r[p.field]:null)},
+    {name:p.shareName,type:'line',yAxisIndex:1,connectNulls:false,symbol:'circle',symbolSize:4,lineStyle:{width:2,type:'dashed'},itemStyle:{color:p.shareColor},tooltip:{valueFormatter:v=>fmt(v,'pct')},data:d.months.map(r=>r[p.share])}
+   ]},true);chart.resize();
+ }
+
 }
 function recalc(){
  if(!ctx)return;const start=$('start').value,end=$('end').value;
@@ -78,7 +107,7 @@ async function refresh(){
   if(request!==seq)return;
   if(!res.unchanged){ctx=res;revision=res.revision;ctxToken=token;}
   if(!ctx)throw Error('No source data');recalc();
- }catch(e){if(request===seq){$('state').textContent=text('读取失败，请重试：','Load failed; retry: ')+(e.message||e);$('list').replaceChildren();$('years').replaceChildren();$('months').replaceChildren();if(chart)chart.clear();}}
+ }catch(e){if(request===seq){$('state').textContent=text('读取失败，请重试：','Load failed; retry: ')+(e.message||e);$('list').replaceChildren();$('years').replaceChildren();$('months').replaceChildren();Object.values(charts).forEach(chart=>chart.clear());}}
  finally{if(request===seq)$('refresh').disabled=false;}
 }
 function quick(kind){
@@ -88,15 +117,15 @@ function quick(kind){
 }
 function mount(){
  host=document.createElement('section');host.id='page-color-dashboard';host.className='page';host.style.display='none';
- host.innerHTML='<div class="ct-toolbar"><b>'+text('橱柜颜色动态','Cabinet Color Trends')+'</b><input id="ct-search" type="search" placeholder="'+text('搜索颜色…','Search colors…')+'"><button class="btn sm" id="ct-last">'+text('上月','Last month')+'</button><button class="btn sm" id="ct-year">'+text('今年','This year')+'</button><button class="btn sm" id="ct-ttm">TTM</button><button class="btn sm" id="ct-all">'+text('全部历史','All history')+'</button><label>'+text('开始','Start')+' <input id="ct-start" type="date"></label><label>'+text('结束','End')+' <input id="ct-end" type="date"></label><label><input id="ct-universal" type="checkbox"> '+text('包含 Universal','Include Universal')+'</label><button class="btn sm" id="ct-refresh">'+text('刷新数据','Refresh')+'</button></div><div class="ct-note">'+text('排除 IC；默认排除 Universal，不作分摊。占比分母为同一期间全部参与统计的橱柜颜色；退货按负数计入。','IC excluded. Universal excluded by default, without allocation. Shares use all included colors in the same period; returns deducted.')+'</div><div id="ct-state" role="status"></div><div class="ct-grid"><div class="ct-left"><b id="ct-list-title"></b><div id="ct-list" class="ct-table"></div></div><div class="ct-right"><b id="ct-selected"></b><div class="ct-analysis"><div id="ct-years" class="ct-table"></div><div id="ct-months" class="ct-table"></div></div><div class="ct-chart-panel"><div id="ct-chart-title"></div><div id="ct-chart"></div></div></div></div>';
+ host.innerHTML='<div class="ct-toolbar"><b>'+text('橱柜颜色动态','Cabinet Color Trends')+'</b><input id="ct-search" type="search" placeholder="'+text('搜索颜色…','Search colors…')+'"><button class="btn sm" id="ct-last">'+text('上月','Last month')+'</button><button class="btn sm" id="ct-year">'+text('今年','This year')+'</button><button class="btn sm" id="ct-ttm">TTM</button><button class="btn sm" id="ct-all">'+text('全部历史','All history')+'</button><label>'+text('开始','Start')+' <input id="ct-start" type="date"></label><label>'+text('结束','End')+' <input id="ct-end" type="date"></label><label><input id="ct-universal" type="checkbox"> '+text('包含 Universal','Include Universal')+'</label><button class="btn sm" id="ct-refresh">'+text('刷新数据','Refresh')+'</button></div><div class="ct-note">'+text('排除 IC；默认排除 Universal，不作分摊。占比分母为同一期间全部参与统计的橱柜颜色；退货按负数计入。','IC excluded. Universal excluded by default, without allocation. Shares use all included colors in the same period; returns deducted.')+'</div><div id="ct-state" role="status"></div><div class="ct-grid"><div class="ct-left"><b id="ct-list-title"></b><div id="ct-list" class="ct-table"></div></div><div class="ct-right"><b id="ct-selected"></b><div class="ct-analysis"><div id="ct-years" class="ct-table"></div><div id="ct-months" class="ct-table"></div></div><div class="ct-charts"><div class="ct-chart-panel"><div id="ct-chart-qty-title" class="ct-chart-title"></div><div id="ct-chart-qty" class="ct-chart"></div></div><div class="ct-chart-panel"><div id="ct-chart-amount-title" class="ct-chart-title"></div><div id="ct-chart-amount" class="ct-chart"></div></div></div></div></div>';
  document.querySelector('main').appendChild(host);
- const style=document.createElement('style');style.textContent=`#page-color-dashboard{padding:10px 12px;gap:8px;min-height:0;flex:1;overflow:hidden}.ct-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:#edf3fb;padding:8px;border-radius:6px}.ct-toolbar input{border:1px solid #cbd5e1;border-radius:4px;height:28px;padding:3px}.ct-toolbar label{white-space:nowrap}.ct-toolbar input[type=checkbox]{vertical-align:middle}.ct-note,#ct-state{font-size:12px;color:#52657d}.ct-grid{display:flex;gap:10px;flex:1;min-height:0}.ct-left{flex:0 0 35%;display:flex;flex-direction:column;gap:8px;min-height:0;min-width:0}#ct-list{flex:1;min-height:0}#ct-list-title{font-size:13px;color:#174779}.ct-right{display:flex;flex-direction:column;gap:8px;min-width:0;flex:1;min-height:0}#ct-selected{font-size:17px;color:#174779}.ct-analysis{display:flex;gap:8px;flex:0 1 425px;max-height:57%;min-height:180px}.ct-analysis>.ct-table{flex:1;min-width:0}.ct-table{overflow:auto;border:1px solid #cbd5e1;border-radius:6px;background:white}.ct-table table{width:100%;min-width:450px;table-layout:fixed;border-collapse:separate;border-spacing:0;font:13px Arial,sans-serif;color:#182330}.ct-table th,.ct-table td{height:30px;padding:4px 6px;border-right:1px solid #cbd5e1;border-bottom:1px solid #cbd5e1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ct-table th{position:sticky;top:0;background:#d9eaf7;text-align:center;z-index:2;font-size:12px}.ct-table tfoot td{position:sticky;bottom:0;background:#d9e6f3;font-weight:bold}.ct-table .ct-n{text-align:right}#ct-list tbody tr{cursor:pointer}#ct-list tbody tr:hover{background:#f0f5ff}#ct-list .ct-selected{background:#dbeafe}.ct-chart-panel{display:flex;flex:1;min-height:160px;flex-direction:column;background:white;border:1px solid #cbd5e1;border-radius:6px;padding:8px}#ct-chart{flex:1;min-height:140px}#ct-chart-title{font-weight:bold;color:#174779;font-size:13px}@media(max-width:1000px){.ct-grid{overflow:auto;flex-direction:column}.ct-left{flex:0 0 280px}.ct-right{min-height:650px}.ct-analysis{max-height:none;flex:0 0 400px}}`;
+ const style=document.createElement('style');style.textContent=`#page-color-dashboard{padding:10px 12px;gap:8px;min-height:0;flex:1;overflow:hidden}.ct-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:#edf3fb;padding:8px;border-radius:6px}.ct-toolbar input{border:1px solid #cbd5e1;border-radius:4px;height:28px;padding:3px}.ct-toolbar label{white-space:nowrap}.ct-toolbar input[type=checkbox]{vertical-align:middle}.ct-note,#ct-state{font-size:12px;color:#52657d}.ct-grid{display:flex;gap:10px;flex:1;min-height:0}.ct-left{flex:0 0 30%;display:flex;flex-direction:column;gap:8px;min-height:0;min-width:0}#ct-list{flex:1;min-height:0}#ct-list-title{font-size:13px;color:#174779}.ct-right{display:flex;flex-direction:column;gap:8px;min-width:0;flex:1;min-height:0}#ct-selected{font-size:17px;color:#174779}.ct-analysis{display:flex;gap:8px;flex:0 1 425px;max-height:57%;min-height:180px}.ct-analysis>.ct-table{flex:1;min-width:0}.ct-table{overflow:auto;border:1px solid #cbd5e1;border-radius:6px;background:white}.ct-table table{width:100%;min-width:440px;table-layout:fixed;border-collapse:separate;border-spacing:0;font:13px Arial,sans-serif;color:#182330}.ct-table th,.ct-table td{height:30px;padding:4px 6px;border-right:1px solid #cbd5e1;border-bottom:1px solid #cbd5e1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ct-table th{white-space:normal;overflow-wrap:break-word;line-height:15px;position:sticky;top:0;background:#d9eaf7;text-align:center;z-index:2;font-size:12px}.ct-table tfoot td{position:sticky;bottom:0;background:#d9e6f3;font-weight:bold}.ct-table .ct-money{text-align:right}.ct-table .ct-center{text-align:center}#ct-list table{min-width:500px}.ct-analysis td:first-child{text-align:center}#ct-list tbody tr{cursor:pointer}#ct-list tbody tr:hover{background:#f0f5ff}#ct-list .ct-selected{background:#dbeafe}.ct-charts{display:flex;flex:1;gap:8px;min-height:190px}.ct-chart-panel{display:flex;flex:1;min-width:0;min-height:180px;flex-direction:column;background:white;border:1px solid #cbd5e1;border-radius:6px;padding:8px}.ct-chart{flex:1;min-height:160px}.ct-chart-title{font-weight:bold;color:#174779;font-size:13px}@media(max-width:1000px){.ct-grid{overflow:auto;flex-direction:column}.ct-left{flex:0 0 280px}.ct-right{min-height:650px}.ct-analysis{max-height:none;flex:0 0 400px}.ct-charts{flex-direction:column;flex:0 0 500px}.ct-right{min-height:960px}}`;
  document.head.appendChild(style);
  $('search').oninput=()=>data&&drawList();$('refresh').onclick=refresh;
  for(const k of ['start','end','universal'])$(k).onchange=recalc;
  for(const k of ['last','year','ttm'])$(k).onclick=()=>quick(k);
  $('all').onclick=()=>{$('start').value='';$('end').value='';recalc();};
- if(window.ResizeObserver){observer=new ResizeObserver(()=>{if(chart&&host.style.display!=='none')chart.resize();});observer.observe($('chart'));}
+ if(window.ResizeObserver){observer=new ResizeObserver(()=>{if(host.style.display!=='none')Object.values(charts).forEach(chart=>chart.resize());});observer.observe($('chart-qty'));observer.observe($('chart-amount'));}
 }
 window.BCSColorTrends={compute,detail,show(options){cfg=options;if(!host)mount();host.style.display='flex';if(ctx&&ctxToken===cfg.token())recalc();return refresh();}};
 })();
