@@ -1472,6 +1472,30 @@
     if(!opts.includes('SLAB'))opts.unshift('SLAB');
     return opts;
   }
+  // BCS_CABINET_MONTHLY_MATRIX_1: fixed style matrix, one setValues call.
+  function renderCabinetMonthlyTemplate(spec,sh,values,off){
+    const key=String(spec.sheet),nr=values.length,nc=spec.values[0].length,baseline={};
+    const money=spec.colorMetric==='amount',last=nr-1;
+    const matrix=values.map((row,r)=>Array.from({length:nc},(_,c)=>{
+      const header=r===off||r===off+1,total=r===last,value=c>0&&c%2===1;
+      const st={bl:r===0||header||total?1:0,vt:2,ht:r<off?1:header?2:c===0?1:value&&money?3:2};
+      if(header)st.bg={rgb:'#d9eaf7'};if(total)st.bg={rgb:'#d9bd8b'};
+      if(r>off+1&&c>0)st.n={pattern:zhFmt(value?(money?'#,##0.00':'#,##0.##'):'0.00%')};
+      cleanGeneratedStyle(st);if(r<300)baseline[r+':'+c]=st;
+      return {v:row[c]===undefined?'':row[c],s:st};
+    }));
+    sh.getMergeData().forEach(r=>r.breakApart());sh.getRange(0,0,nr,nc).setValues(matrix);
+    if(off){sh.getRange(0,0,1,nc).merge();if(off>1)sh.getRange(1,0,1,nc).merge();}
+    sh.getRange(off,0,2,1).merge();
+    for(let c=1;c+1<nc;c+=2)sh.getRange(off,c,1,2).merge();
+    const widths=Array.from({length:nc},(_,c)=>c===0?200:c%2===0?90:money?150:100);
+    widths.forEach((w,c)=>sh.setColumnWidth(c,w));sh.showRows(0,nr);sh.setRowHeights(0,nr,30);
+    sh.setFrozenRows(off+2);sh.setFrozenColumns(1);
+    S.appliedLayouts[key]={w:widths,h:{},fz:{y:off+2,x:1}};S.appliedStyles[key]=baseline;
+    S.sheetExtent=S.sheetExtent||{};S.sheetExtent[key]={rows:nr,cols:nc};S.lastRenderedSheet=key;sh.activate();
+    try{window.dispatchEvent(new Event('resize'));}catch(e){}
+  }
+
   function renderProductCustomerTemplate(spec,sh,values,off) {
     const customer=!!spec.customerTemplate,cab=spec.sheet==='橱柜颜色统计';
     const key=String(spec.sheet),nr=values.length,nc=spec.values[0].length,baseline={};
@@ -1689,6 +1713,7 @@
     try {
       if (sh.getMaxRows() < need) sh.insertRows(sh.getMaxRows(), need - sh.getMaxRows());
     } catch (e) { /* ignore */ }
+    if(spec.cabinetColorMatrix===1){renderCabinetMonthlyTemplate(spec,sh,values,off);return;}
     if(spec.customerTemplate || ['橱柜颜色统计','石材销量统计'].includes(spec.sheet)){renderProductCustomerTemplate(spec,sh,values,off);return;}
     if(spec.salesQueryTemplate) {renderSalesQueryTemplate(spec,sh);return;}
     if (CUSTOMER_BATCH_SHEETS.includes(spec.sheet)) {
@@ -1894,8 +1919,8 @@
     { id: 'g-stats', labelKey: 'navStats', icon: '📊', reports: [
       { id: 'annual', labelKey: 'statAnnual', fields: [] },   // 年度统计固定全量（无时间段）
       { id: 'cabinetColors', labelKey: 'statColors', fields: ['range'], actions: [
-        { labelKey: 'genNoUni', opts: { includeUniversal: false } },
-        { labelKey: 'genWithUni', opts: { includeUniversal: true } },
+        { labelKey: 'genQty', opts: { mode: 'qty' } },
+        { labelKey: 'genAmount', opts: { mode: 'amount' } },
       ] },
       { id: 'stoneSales', labelKey: 'statStone', fields: ['range', 'type'] },
     ] },
@@ -1968,6 +1993,7 @@
     if(def.id.startsWith('act')) {opts=Object.assign({},opts,{start:'',end:''});
       if(['actBySales1','actByCity','actByType'].includes(def.id)) opts.fCust='';
     }
+    if(def.id==='cabinetColors')S.statOpts[def.id]=Object.assign({},opts,{mode:opts.mode||'qty'});
     const pf0 = performance.now();
     const annualNow = new Date();
     const annualWindow = annualNow.getFullYear() + '-' + annualNow.getMonth();
@@ -1987,7 +2013,7 @@
     const categoryRange = JSON.stringify([opts.start || '', opts.end || '', opts.category || 'ALL', opts.mode || 'amount', annualWindow]);
     const priorCategory = def.id === 'categoryQuery' ? S.statResults[def.id] : null;
     const reusableCategory = priorCategory && !priorCategory.saveFailed &&
-      priorCategory.categoryAlgorithm === 1 && priorCategory.categoryRange === categoryRange;
+      priorCategory.categoryAlgorithm === 2 && priorCategory.categoryRange === categoryRange;
     const knownCategoryRevision = reusableCategory ? priorCategory.dataRevision || '' : '';
     const historyRange = JSON.stringify([opts.start || '',opts.end || '',opts.custNo || '',opts.itemNo || '',opts.invoice || '',opts.sales || '']);
     const priorHistory = def.id === 'salesHistory' ? S.statResults[def.id] : null;
@@ -2002,9 +2028,9 @@
     const reusableBatch=priorBatch && !priorBatch.saveFailed && priorBatch.customerBatchAlgorithm===1 && (!PURCHASE_STATE_REPORT_IDS.includes(def.id) || priorBatch.purchaseRuleVersion===1) && priorBatch.customerBatchRange===batchRange && (def.id!=='salesAccount' || (priorBatch.openingClock===2 && priorBatch.openingAsOf===accountCalendarToday()));
     const knownBatchRevision=reusableBatch ? priorBatch.dataRevision || '' : '';
     const isProduct=['cabinetColors','stoneSales'].includes(def.id);
-    const productRange=JSON.stringify([opts.start || '',opts.end || '',opts.type || 'SLAB',opts.includeUniversal===true,costVisible()]);
+    const productRange=JSON.stringify([opts.start || '',opts.end || '',opts.type || 'SLAB',opts.includeUniversal===true,costVisible(),def.id==='cabinetColors'?(opts.mode||'qty'):'']);
     const priorProduct=isProduct ? S.statResults[def.id]:null;
-    const reusableProduct=priorProduct && !priorProduct.saveFailed && priorProduct.productAlgorithm===2 && priorProduct.productRange===productRange;
+    const reusableProduct=priorProduct && !priorProduct.saveFailed && priorProduct.productAlgorithm===2 && priorProduct.productRange===productRange && (def.id!=='cabinetColors'||priorProduct.cabinetColorMatrix===1);
     const knownProductRevision=reusableProduct ? priorProduct.dataRevision || '':'';
     const priorFast = reusableAnnual ? priorAnnual : reusablePerformance ? priorPerformance : reusableOrders ? priorOrders : reusableCategory ? priorCategory : reusableHistory ? priorHistory : reusableCustomerStats ? priorCustomerStats : reusableBatch ? priorBatch : reusableProduct ? priorProduct : null;
     S.ctxCache = null; // 每次重新生成都读取最新数据，避免把旧缓存保存成新报表。
@@ -2016,7 +2042,7 @@
         def.id === 'salesHistory' ? await api('get_history_context', opts.start || '', opts.end || '', {custNo:opts.custNo,itemNo:opts.itemNo,invoice:opts.invoice,sales:opts.sales}, knownHistoryRevision) :
         def.id === 'customerStats' ? await api('get_customer_stats_context', opts.start || '', opts.end || '', knownCustomerStatsRevision) :
         CUSTOMER_BATCH_IDS.includes(def.id) ? await customerBatchContext(opts,knownBatchRevision) :
-        isProduct ? await productContext(opts,knownProductRevision) :
+        isProduct ? await productContext(def.id==='cabinetColors'?{start:'',end:''}:opts,knownProductRevision) :
         await api('get_stats_context', opts.start || '', opts.end || ''));
       if (!isProduct && !CUSTOMER_BATCH_IDS.includes(def.id) && !['annual', 'salesPerformance', 'customerOrders', 'categoryQuery', 'salesHistory', 'customerStats'].includes(def.id)) putCtx(opts.start || '', opts.end || '', c);
       return c;
@@ -2125,7 +2151,7 @@
     if (def.id === 'categoryQuery') {
       spec.dataRevision = revision;
       spec.categoryRange = categoryRange;
-      spec.categoryAlgorithm = 1;
+      spec.categoryAlgorithm = 2;
     }
     if (def.id === 'customerOrders') {
       spec.dataRevision = revision;
@@ -2194,6 +2220,15 @@
     try {
       await ensureXlsxLib();
       const ws = XLSX.utils.aoa_to_sheet(spec.values);
+      if(spec.cabinetColorMatrix===1){
+        const nc=spec.values[0].length,money=spec.colorMetric==='amount';
+        ws['!merges']=[{s:{r:0,c:0},e:{r:1,c:0}}];
+        for(let c=1;c+1<nc;c+=2)ws['!merges'].push({s:{r:0,c},e:{r:0,c:c+1}});
+        ws['!cols']=Array.from({length:nc},(_,c)=>({wpx:c===0?200:c%2===0?90:money?150:100}));
+        for(let r=2;r<spec.values.length;r++)for(let c=1;c<nc;c++){
+          const cell=ws[XLSX.utils.encode_cell({r,c})];if(cell&&cell.t==='n')cell.z=c%2===0?'0.00%':money?'#,##0.00':'#,##0.##';
+        }
+      }
       if(CUSTOMER_REPORT_WIDTHS_V2[spec.sheet])ws['!cols']=CUSTOMER_REPORT_WIDTHS_V2[spec.sheet].map(w=>({wpx:w}));
       if(spec.yearGroups){
         ws['!merges']=(spec.merges || []).map((m)=>({
@@ -2286,6 +2321,13 @@
     const box = $('#stat-cond-fields');
     box.innerHTML = '';
     if (!S.statOpts[def.id]) S.statOpts[def.id] = {};
+    // BCS_CABINET_MONTHLY_MATRIX_1
+    if(def.id==='cabinetColors'){
+      if(!S.cabinetMatrixReady){S.statOpts[def.id].includeUniversal=false;S.cabinetMatrixReady=true;}
+      const label=document.createElement('label');label.style.cssText='display:inline-flex;align-items:center;gap:5px;margin-right:8px;';
+      const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.dataset.k='includeUniversal';checkbox.checked=S.statOpts[def.id].includeUniversal===true;
+      label.appendChild(checkbox);label.appendChild(document.createTextNode(LANG==='zh'?'包含 Universal':'Include Universal'));box.appendChild(label);
+    }
     // 快速时间段：上月 / 今年 / TTM / 重置（重置=不限时段即全部数据）
     if ((def.fields || []).includes('range')) {
       const now = new Date();
@@ -2382,6 +2424,8 @@
       await runStat(def,Object.assign({},collectStatOpts(def)),null);return;
     }
     const cached = S.statResults[def.id];
+    if(def.id==='categoryQuery' && cached && cached.categoryAlgorithm!==2){const mode=(S.statOpts[def.id]||{}).mode||'amount';await runStat(def,Object.assign({},collectStatOpts(def),{mode}),null);return;}
+    if(def.id==='cabinetColors' && cached && cached.cabinetColorMatrix!==1){await runStat(def,Object.assign({},collectStatOpts(def)),null);return;}
     if(def.id==='salesAccount' && cached &&
        (cached.openingClock!==2 || cached.openingAsOf!==accountCalendarToday())) {
       await runStat(def,Object.assign({},collectStatOpts(def)),null);return;
@@ -2762,6 +2806,7 @@
     $('#stat-cond-fields').querySelectorAll('[data-k]').forEach((el) => {
       vals[el.dataset.k] = el.type === 'checkbox' ? el.checked : el.value;
     });
+    if(def.id==='cabinetColors')vals.mode=(S.statOpts[def.id]||{}).mode||'qty';
     S.statOpts[def.id] = vals;
     return vals;
   }

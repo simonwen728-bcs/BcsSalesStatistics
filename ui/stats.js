@@ -582,12 +582,12 @@ window.STATS = (function () {
       if (!minDate || dt < minDate) minDate = dt;
       if (!maxDate || dt > maxDate) maxDate = dt;
     });
-    const allYears = Array.from(allYearsSet).sort((a, b) => Number(a) - Number(b));
+    const allYears = Array.from(allYearsSet).sort((a, b) => Number(b) - Number(a));
     if (!allYears.length) return { error: t('statEmpty').replace('{msg}', 'no dates') };
 
     const effectiveStart = rg.start || minDate;
     const effectiveEnd = rg.end || maxDate;
-    const monthKeys = monthKeysBetween(effectiveStart.substring(0, 7), effectiveEnd.substring(0, 7));
+    const monthKeys = monthKeysBetween(effectiveStart.substring(0, 7), effectiveEnd.substring(0, 7)).reverse();
 
     const yw = ytdWindow();
     const ytdStart = yw.start, ytdEnd = yw.ytdEndInclusive;
@@ -632,9 +632,10 @@ window.STATS = (function () {
       });
     if (!itemList.length) return { error: t('statEmpty').replace('{msg}', 'category') };
 
-    const yearStartCol = 5;
-    const ytdCol = yearStartCol + allYears.length;
-    const monthStartCol = ytdCol + 1;
+    // BCS_CATEGORY_RECENT_FIRST_1
+    const ytdCol = 5;
+    const yearStartCol = 6;
+    const monthStartCol = yearStartCol + allYears.length;
     const totalCols = 4 + allYears.length + 1 + monthKeys.length;
 
     const header1 = new Array(totalCols).fill('');
@@ -650,7 +651,7 @@ window.STATS = (function () {
       const year = parts[0];
       const month = Number(parts[1]);
       const idx = monthStartCol - 1 + i;
-      header2[idx] = month + (t('colType') === '类别' ? '月' : 'M');
+      header2[idx] = key.replace('-', '');
       if (i === 0 || monthKeys[i - 1].substring(0, 4) !== year) header1[idx] = year;
     });
     spec.values.push(header1, header2);
@@ -699,7 +700,7 @@ window.STATS = (function () {
     spec.align.push({ range: 'D3:' + colLetter(totalCols) + totalRowNo, horiz: mode === 'qty' ? 'center' : 'right' });
     // 列宽写死（用户要求）：A=100, B=100, C=200, D-H(合计/年/TTM)=120, I起月列=100
     spec.widths = [[1, 100], [2, 100], [3, 200], [4, 120]];
-    for (let c = yearStartCol; c <= ytdCol; c++) spec.widths.push([c, 120]);
+    for (let c = ytdCol; c < monthStartCol; c++) spec.widths.push([c, 120]);
     for (let c = monthStartCol; c <= totalCols; c++) spec.widths.push([c, 100]);
     spec.freeze = { rows: 2, cols: 3 };
     return spec;
@@ -830,157 +831,49 @@ window.STATS = (function () {
   // 拆到具体颜色；该 Item 没有非 UNIVERSAL 记录时退回全局颜色占比。
   // 「包含 UNIVERSAL」时 UNIVERSAL 仍单独成行、不拆分。
   // ============================================================
+  // BCS_CABINET_MONTHLY_MATRIX_1
   function cabinetColors(data, opts, t) {
-    const rg = range(opts.start, opts.end);
-    if (!rg.success) return { error: t('statEmpty').replace('{msg}', rg.message) };
-    const includeUniversal = opts.includeUniversal === true;
-    const spec = baseSpec('橱柜颜色统计');
-    const groupMap = sales1Groups(opts.reps || { s1: [], s2: [] });
-
-    const colorOf = (raw) => String(raw || '').trim() || '(空白)';
-    // 颜色汇总：normalPerItem[item][colorKey] / universalPerItem[item]
-    const normalPerItem = {};
-    const universalPerItem = {};
-    const colorMeta = {};   // colorKey -> 显示名
-    let universalQty = 0, universalAmount = 0;
-    let normalQty = 0, normalAmount = 0;
-    // 全局颜色合计（Item 级拆分缺参照时的回退权重）
-    const globalColor = {};
-
-    data.forEach((r) => {
-      const sales1Code = String(r.rep1 || '').trim().toUpperCase();
-      if (isIC(sales1Code, groupMap)) return;
-      const dt = date(r.soldDate);
-      if (!inRange(dt, rg)) return;
-      if (!isCabinetType(r.type)) return;
-      const rawColor = String(r.color || '').trim();
-      const normalized = rawColor.toUpperCase();
-      const qty = amount(r.qty);
-      const amt = amount(r.amount);
-      const item = String(r.itemNo || '').trim().toUpperCase() || '(NO ITEM)';
-      if (normalized === 'UNIVERSAL') {
-        if (!universalPerItem[item]) universalPerItem[item] = { qty: 0, amount: 0 };
-        universalPerItem[item].qty += qty;
-        universalPerItem[item].amount += amt;
-        universalQty += qty; universalAmount += amt;
-        return;
-      }
-      const color = colorOf(rawColor);
-      const key = color.toUpperCase();
-      colorMeta[key] = color;
-      if (!normalPerItem[item]) normalPerItem[item] = {};
-      if (!normalPerItem[item][key]) normalPerItem[item][key] = { qty: 0, amount: 0 };
-      normalPerItem[item][key].qty += qty;
-      normalPerItem[item][key].amount += amt;
-      if (!globalColor[key]) globalColor[key] = { qty: 0, amount: 0 };
-      globalColor[key].qty += qty;
-      globalColor[key].amount += amt;
-      normalQty += qty;
-      normalAmount += amt;
-    });
-
-    // 汇总容器：颜色 → {qty, amount}
-    const totals = {};
-    const addTo = (key, qty, amt) => {
-      if (!totals[key]) totals[key] = { qty: 0, amount: 0 };
-      totals[key].qty += qty;
-      totals[key].amount += amt;
-    };
-    Object.keys(globalColor).forEach((key) => addTo(key, globalColor[key].qty, globalColor[key].amount));
-
-    // 数量拆分：最大余数法，保证拆分后整数数量之和严格等于目标
-    const splitQty = (weights, target) => {
-      // weights: [{key, weight}]（取绝对值加权），target 整数（带符号）
-      const sign = target < 0 ? -1 : 1;
-      const abs = Math.abs(target);
-      const weightTotal = weights.reduce((s, w) => s + Math.abs(w.weight), 0);
-      if (!abs || weightTotal <= 0) return null;
-      const alloc = weights.map((w, idx) => {
-        const exact = (abs * Math.abs(w.weight)) / weightTotal;
-        const base = Math.floor(exact);
-        return { key: w.key, idx, base, frac: exact - base };
-      });
-      let used = alloc.reduce((s, a) => s + a.base, 0);
-      let remainder = abs - used;
-      alloc.sort((a, b) => b.frac - a.frac || a.idx - b.idx);
-      for (let i = 0; i < remainder; i++) alloc[i % alloc.length].base += 1;
-      alloc.sort((a, b) => a.idx - b.idx);
-      const out = {};
-      alloc.forEach((a) => (out[a.key] = sign * a.base));
-      return out;
-    };
-
-    if (!includeUniversal) {
-      const hasAnyNormal = Object.keys(globalColor).length > 0;
-      if (!hasAnyNormal) {
-        return { error: t('statEmpty').replace('{msg}', 'cabinet colors') };
-      }
-      Object.keys(universalPerItem).forEach((item) => {
-        const u = universalPerItem[item];
-        const perItem = normalPerItem[item] || {};
-        let keys = Object.keys(perItem);
-        let weightsQty, weightsAmt;
-        if (keys.length) {
-          // Item 级拆分：优先用该 Item 自己的颜色构成
-          weightsQty = keys.map((k) => ({ key: k, weight: perItem[k].qty }));
-          weightsAmt = keys.map((k) => ({ key: k, weight: perItem[k].amount !== 0 ? perItem[k].amount : perItem[k].qty }));
-        } else {
-          // 该 Item 没有非 UNIVERSAL 记录 → 退回全局颜色占比
-          keys = Object.keys(globalColor);
-          weightsQty = keys.map((k) => ({ key: k, weight: globalColor[k].qty }));
-          weightsAmt = keys.map((k) => ({ key: k, weight: globalColor[k].amount !== 0 ? globalColor[k].amount : globalColor[k].qty }));
-        }
-        // 金额拆分：按权重占比分配 UNIVERSAL 金额（金额可为小数，不取整）
-        const amtWeightTotal = weightsAmt.reduce((s, w) => s + Math.abs(w.weight), 0);
-        if (u.amount !== 0 && amtWeightTotal > 0) {
-          weightsAmt.forEach((w) => {
-            addTo(w.key, 0, u.amount * (Math.abs(w.weight) / amtWeightTotal) * (w.weight < 0 ? -1 : 1));
-          });
-        }
-        // 数量拆分：最大余数取整
-        const qtyAlloc = splitQty(weightsQty, Math.round(u.qty));
-        if (qtyAlloc) Object.keys(qtyAlloc).forEach((k) => addTo(k, qtyAlloc[k], 0));
-      });
-    } else if (universalQty !== 0 || universalAmount !== 0) {
-      addTo('UNIVERSAL', universalQty, universalAmount);
-      colorMeta['UNIVERSAL'] = 'UNIVERSAL';
+    const rg=range(opts.start,opts.end);
+    if(!rg.success)return {error:'Invalid date range'};
+    const mode=opts.mode==='amount'?'amount':'qty',include=opts.includeUniversal===true;
+    const groups=sales1Groups(opts.reps||{s1:[],s2:[]});
+    let latest='';data.forEach(r=>{const d=date(r.soldDate);if(d>latest)latest=d;});
+    const cutoff=opts.end&&opts.end<latest?opts.end:latest;
+    if(!cutoff)return {error:'NO_DATA'};
+    const totals=new Map(),colors=new Map(),rank=new Map();
+    const add=(map,k,q,a)=>{let v=map.get(k);if(!v){v={qty:0,amount:0,rows:0};map.set(k,v);}v.qty+=q;v.amount+=a;v.rows++;};
+    for(const r of data){
+      const d=date(r.soldDate),c=String(r.color||'').trim().replace(/\s+/g,' ').toUpperCase()||'(空白)';
+      if(!d||d>cutoff||!isCabinetType(r.type)||isIC(String(r.rep1||'').trim().toUpperCase(),groups)||(!include&&c==='UNIVERSAL'))continue;
+      const q=amount(r.qty),a=amount(r.amount),m=d.slice(0,7),y=d.slice(0,4);
+      let map=colors.get(c);if(!map){map=new Map();colors.set(c,map);}
+      for(const k of [m,y]){add(totals,k,q,a);add(map,k,q,a);}
+      if((!opts.start||d>=opts.start)&&(!opts.end||d<=opts.end))add(rank,c,q,a);
     }
-
-    let list = Object.keys(totals).map((key) => ({ color: colorMeta[key] || key, qty: totals[key].qty, amount: totals[key].amount }));
-    if (!list.length) return { error: t('statEmpty').replace('{msg}', 'cabinet colors') };
-
-    const totalQty = includeUniversal ? normalQty + universalQty : list.reduce((s, x) => s + x.qty, 0);
-    const totalAmount = includeUniversal ? normalAmount + universalAmount : list.reduce((s, x) => s + x.amount, 0);
-
-    list.sort((a, b) => {
-      const au = String(a.color || '').toUpperCase() === 'UNIVERSAL';
-      const bu = String(b.color || '').toUpperCase() === 'UNIVERSAL';
-      if (au && !bu) return 1;
-      if (!au && bu) return -1;
-      if (b.qty !== a.qty) return b.qty - a.qty;
-      return String(a.color).localeCompare(String(b.color), undefined, { sensitivity: 'base' });
+    const y=+cutoff.slice(0,4),m=+cutoff.slice(5,7),periods=[];
+    for(let back=0;back<12;back++)periods.push(new Date(Date.UTC(y,m-1-back,1)).toISOString().slice(0,7));
+    periods.push(...[...totals.keys()].filter(k=>/^\d{4}$/.test(k)).sort().reverse());
+    const names=[...colors.keys()].sort((a,b)=>a==='UNIVERSAL'?1:b==='UNIVERSAL'?-1:(rank.get(b)?.[mode]||0)-(rank.get(a)?.[mode]||0)||a.localeCompare(b));
+    if(!names.length)return {error:'NO_DATA'};
+    const spec=baseSpec(mode==='amount'?'橱柜颜色金额统计':'橱柜颜色数量统计');
+    spec.cabinetColorMatrix=1;spec.colorMetric=mode;spec.colorPeriods=periods;spec.colorCutoff=cutoff;
+    spec.values=[['颜色',...periods.flatMap(p=>[p,''])],['',...periods.flatMap(()=>[mode==='amount'?'销售金额':'销售数量','占比'])]];
+    names.forEach(c=>spec.values.push([c,...periods.flatMap(p=>{
+      const v=colors.get(c).get(p),denom=totals.get(p);
+      return [v?v[mode]:0,denom&&denom[mode]!==0?(v?v[mode]:0)/denom[mode]:''];
+    })]));
+    spec.values.push(['合计',...periods.flatMap(p=>{const v=totals.get(p);return [v?v[mode]:0,v&&v[mode]!==0?1:''];})]);
+    const n=spec.values.length;
+    periods.forEach((p,i)=>{
+      const c=2+i*2;
+      spec.numFmt.push({range:rng(3,c,n,c),fmt:mode==='amount'?'#,##0.00':'#,##0.##'});
+      spec.numFmt.push({range:rng(3,c+1,n,c+1),fmt:'0.00%'});
     });
-
-    spec.values.push(['颜色', '数量', '数量占比', '金额', '金额占比']);
-    list.forEach((x) => spec.values.push([x.color, x.qty, totalQty ? x.qty / totalQty : 0, x.amount, totalAmount ? x.amount / totalAmount : 0]));
-    spec.values.push(['合计', totalQty, '', totalAmount, '']);
-    const lastRow = spec.values.length;
-    spec.bold.push(rng(1, 1, 1, 5));
-    spec.bg.push({ range: rng(1, 1, 1, 1), color: '#ffe699' });
-    spec.bg.push({ range: rng(1, 2, 1, 5), color: '#d9e6f3' });
-    spec.numFmt.push({ range: 'B2:B' + lastRow, fmt: '#,##0' });
-    spec.numFmt.push({ range: 'C2:C' + (lastRow - 1), fmt: '0.00%' });
-    spec.numFmt.push({ range: 'D2:D' + lastRow, fmt: '#,##0.00' });
-    spec.numFmt.push({ range: 'E2:E' + (lastRow - 1), fmt: '0.00%' });
-    spec.align.push({ range: 'B2:E' + lastRow, horiz: 'right' });
-    spec.align.push({ range: 'A2:A' + lastRow, horiz: 'left' });
-    spec.bold.push(rng(lastRow, 1, lastRow, 5));
-    spec.bg.push({ range: rng(lastRow, 1, lastRow, 5), color: '#d9bd8b' });
-    spec.widths = [[1, 180], [2, 105], [3, 125], [4, 140], [5, 125]];
-    spec.freeze = { rows: 1, cols: 0 };
-    spec.info = includeUniversal ? (LANG_UNIVERSAL_INCLUDE) : LANG_UNIVERSAL_SPLIT;
+    spec.freeze={rows:2,cols:1};
+    spec.info='截至 '+cutoff+'；月度倒序12个月，年度倒序；排除IC；'+(include?'包含Universal，单独列于末尾':'直接排除Universal，不分摊')+'。颜色排序区间：'+(opts.start||'最早')+' — '+(opts.end||latest)+'；历史期间按各自总数计算占比。';
     return spec;
   }
+
   const LANG_UNIVERSAL_INCLUDE = '包含 UNIVERSAL：单独成行，不参与拆分';
   const LANG_UNIVERSAL_SPLIT = 'UNIVERSAL 已按 Item 的颜色构成拆分到各颜色（数量按占比取整，金额按金额占比）';
 
