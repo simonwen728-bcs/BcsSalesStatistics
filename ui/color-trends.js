@@ -1,4 +1,4 @@
-/* BCS_COLOR_TRENDS_7_ALLOCATION; BCS_COLOR_TRENDS_6_TABLES; BCS_COLOR_TRENDS_5_ALIGN; BCS_COLOR_TRENDS_4_WIDTHS; BCS_COLOR_TRENDS_3_CHARTS; BCS_COLOR_TRENDS_2_SUMMARY; BCS_COLOR_TRENDS_1 — fixed native tables; no spreadsheet style replay. */
+/* BCS_COLOR_TRENDS_8_RECONCILE; BCS_COLOR_TRENDS_7_ALLOCATION; BCS_COLOR_TRENDS_6_TABLES; BCS_COLOR_TRENDS_5_ALIGN; BCS_COLOR_TRENDS_4_WIDTHS; BCS_COLOR_TRENDS_3_CHARTS; BCS_COLOR_TRENDS_2_SUMMARY; BCS_COLOR_TRENDS_1 — fixed native tables; no spreadsheet style replay. */
 (function(){
 'use strict';
 const empty=()=>({qty:0,amount:0,rows:0});
@@ -6,54 +6,71 @@ const add=(a,q,v)=>{a.qty+=q;a.amount+=v;a.rows++;};
 const key=v=>String(v||'').trim().replace(/\s+/g,' ').toUpperCase();
 const number=v=>{const n=Number(String(v??'').replace(/[$,]/g,''));return Number.isFinite(n)?n:0;};
 const validDate=v=>{const d=String(v||'').slice(0,10);return /^\d{4}-\d{2}-\d{2}$/.test(d)?d:'';};
+// BCS_COLOR_ALLOCATION_MONTHLY_LEDGER_1: allocate once; every view sums the same dated records.
+function allocateCabinetRows(rows,include){
+ if(include)return rows;
+ const groups=new Map(),out=rows.filter(r=>r.color!=='UNIVERSAL');
+ const aggregate=list=>{const map=new Map();for(const r of list){let v=map.get(r.color);if(!v){v={qty:0,amount:0};map.set(r.color,v);}v.qty+=r.qty;v.amount+=r.amount;}return map;};
+ const all=aggregate(out),items=new Map();
+ for(const r of out){if(!items.has(r.item))items.set(r.item,[]);items.get(r.item).push(r);}
+ for(const r of rows){const m=r.date.slice(0,7);if(!groups.has(m))groups.set(m,[]);groups.get(m).push(r);}
+ const split=(weights,target)=>{
+  const total=weights.reduce((s,w)=>s+w[1],0),sign=target<0?-1:1,n=Math.abs(target);
+  if(!n)return weights.map(w=>[w[0],0]);
+  if(!total)throw Error('Universal分摊缺少有效颜色参照');
+  const result=weights.map(([c,w],i)=>{const x=n*w/total;return {c,i,n:Math.floor(x),f:x-Math.floor(x)};});
+  let rest=n-result.reduce((s,r)=>s+r.n,0);const order=[...result].sort((a,b)=>b.f-a.f||a.i-b.i);
+  for(let i=0;i<rest;i++)order[i%order.length].n++;
+  return result.map(r=>[r.c,r.n*sign]);
+ };
+ for(const [month,list] of groups){
+  const normal=list.filter(r=>r.color!=='UNIVERSAL'),global=aggregate(normal),perItem=new Map(),universal=new Map();
+  for(const r of normal){if(!perItem.has(r.item))perItem.set(r.item,[]);perItem.get(r.item).push(r);}
+  for(const r of list.filter(r=>r.color==='UNIVERSAL')){
+   const k=r.item+'\u0000'+(r.qty<0?'-':'+');if(!universal.has(k))universal.set(k,[]);universal.get(k).push(r);
+  }
+  for(const us of universal.values()){
+   const item=us[0].item;
+   const candidates=[aggregate(perItem.get(item)||[]),global,aggregate(items.get(item)||[]),all];
+   const weights=field=>{
+    for(const map of candidates){const w=[...map].sort((a,b)=>a[0].localeCompare(b[0])).map(([c,v])=>[c,Math.abs(field==='amount'?(v.amount||v.qty):(v.qty||v.amount))]);if(w.some(x=>x[1]>0))return w;}
+    throw Error('Universal分摊缺少颜色参照：'+month+' / '+item);
+   };
+   if(!us.some(r=>r.qty||r.amount))continue;
+   // Positive and negative quantities stay separate, preserving both sales and returns.
+   us.sort((a,b)=>a.date.localeCompare(b.date)||a.order.localeCompare(b.order)||a.qty-b.qty||a.amount-b.amount);
+   const qw=weights('qty'),aw=weights('amount'),sign=us[0].qty<0?-1:1;
+   const remaining=new Map(split(qw,us.reduce((s,r)=>s+Math.round(Math.abs(r.qty)),0)));
+   for(const r of us){
+    const qa=split([...remaining],Math.round(Math.abs(r.qty))),aa=split(aw,Math.round(r.amount*100));
+    const allocated=new Map();
+    for(const [c,q] of qa){remaining.set(c,remaining.get(c)-q);allocated.set(c,{qty:q*sign,amount:0});}
+    for(const [c,cents] of aa){if(!allocated.has(c))allocated.set(c,{qty:0,amount:0});allocated.get(c).amount=cents/100;}
+    for(const [color,v] of allocated)if(v.qty||v.amount)out.push({...r,color,qty:v.qty,amount:v.amount});
+   }
+  }
+ }
+ return out;
+}
+
 function compute(sales,reps,opts){
  const group=new Map((reps?.s1||[]).map(r=>[key(r.code),key(r.group)]));
  const latest=sales.reduce((m,r)=>{const d=validDate(r.soldDate);return d>m?d:m;},'');
  const cutoff=opts.end && opts.end<latest?opts.end:latest;
- const colors=new Map(),months=new Map(),years=new Map(),buckets=new Map();let total=empty();
+ const colors=new Map(),months=new Map(),years=new Map();let total=empty();
  const addMap=(map,k,q,a)=>{if(!map.has(k))map.set(k,empty());add(map.get(k),q,a);};
+ const source=[];
  for(const r of sales){
   const d=validDate(r.soldDate),type=key(r.type).replace(/\s/g,'');
-  if(!d||!cutoff||d>cutoff||!['CABINET','CABINETOTHERS'].includes(type)||key(r.rep1)==='IC'||group.get(key(r.rep1))==='IC')continue;
-  const name=key(r.color)||'(空白)',q=number(r.qty),a=number(r.amount),item=key(r.itemNo)||'(NO ITEM)';
-  const keys=[d.slice(0,7),d.slice(0,4)];if(!opts.start||d>=opts.start)keys.push('区间');
-  for(const k of keys){
-   if(!buckets.has(k))buckets.set(k,{normal:new Map(),items:new Map(),universal:new Map()});
-   const b=buckets.get(k);
-   if(name==='UNIVERSAL')addMap(b.universal,item,q,a);
-   else {addMap(b.normal,name,q,a);if(!b.items.has(item))b.items.set(item,new Map());addMap(b.items.get(item),name,q,a);}
-  }
+  if(!d||!['CABINET','CABINETOTHERS'].includes(type)||key(r.rep1)==='IC'||group.get(key(r.rep1))==='IC')continue;
+  source.push({date:d,color:key(r.color)||'(空白)',item:key(r.itemNo)||'(NO ITEM)',qty:number(r.qty),amount:number(r.amount),order:String(r.invoiceNo||r.invoice||'')});
  }
- const post=(name,k,q,a)=>{
-  if(!colors.has(name))colors.set(name,{name,period:empty(),months:new Map(),years:new Map()});const c=colors.get(name);
-  if(k==='区间'){add(c.period,q,a);add(total,q,a);}
-  else {const cm=k.length===7?c.months:c.years,tm=k.length===7?months:years;addMap(cm,k,q,a);addMap(tm,k,q,a);}
- };
-    const split=(weights,target,integer)=>{
-      const total=weights.reduce((s,w)=>s+w[1],0);if(!total||!target)return [];
-      const sign=target<0?-1:1,abs=Math.abs(target);
-      const out=weights.map(([key,w],i)=>{const exact=abs*w/total;return {key,i,v:integer?Math.floor(exact):exact,frac:exact-Math.floor(exact)};});
-      if(integer){let rest=Math.round(abs)-out.reduce((s,x)=>s+x.v,0);const sorted=[...out].sort((a,b)=>b.frac-a.frac||a.i-b.i);for(let i=0;i<rest;i++)sorted[i%sorted.length].v++;}
-      else if(out.length)out[out.length-1].v=abs-out.slice(0,-1).reduce((s,x)=>s+x.v,0);
-      return out.map(x=>[x.key,sign*x.v]);
-    };
-
- for(const [k,b] of buckets){
-  for(const [c,v] of b.normal)post(c,k,v.qty,v.amount);
-  for(const [item,u] of b.universal){
-   if(opts.includeUniversal){post('UNIVERSAL',k,u.qty,u.amount);continue;}
-   const weights=field=>{
-    for(const map of [b.items.get(item),b.normal]){
-     if(!map)continue;
-     const w=[...map].map(([c,v])=>[c,Math.abs(field==='amount'?(v.amount||v.qty):v.qty)]);
-     if(w.some(x=>x[1]>0))return w;
-    }
-    return [...b.normal].map(([c])=>[c,1]);
-   };
-   if(!b.normal.size&&(u.qty||u.amount))throw Error('Universal分摊缺少颜色参照：'+k+' / '+item);
-   for(const [c,q] of split(weights('qty'),Math.round(u.qty),true))post(c,k,q,0);
-   for(const [c,a] of split(weights('amount'),u.amount,false))post(c,k,0,a);
-  }
+ for(const r of allocateCabinetRows(source,opts.includeUniversal)){
+  if(!cutoff||r.date>cutoff)continue;
+  if(!colors.has(r.color))colors.set(r.color,{name:r.color,period:empty(),months:new Map(),years:new Map()});
+  const c=colors.get(r.color),m=r.date.slice(0,7),y=r.date.slice(0,4);
+  for(const [map,k] of [[months,m],[years,y],[c.months,m],[c.years,y]])addMap(map,k,r.qty,r.amount);
+  if(!opts.start||r.date>=opts.start){add(c.period,r.qty,r.amount);add(total,r.qty,r.amount);}
  }
  const ratio=(value,denom)=>denom && denom!==0?value/denom:null;
  const metrics=(v,denom)=>({qty:v.qty,amount:v.amount,qtyShare:ratio(v.qty,denom.qty),amountShare:ratio(v.amount,denom.amount),rows:v.rows});

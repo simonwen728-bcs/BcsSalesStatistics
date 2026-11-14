@@ -1305,7 +1305,7 @@
   function renderPerformanceTemplate(spec, sh) {
     const nr = spec.values.length, nc = spec.values[0].length;
     const key = String(spec.sheet);
-    const isOrders = key === '客户订单统计';
+    const isOrders = key === '客户订单统计',isYear=spec.performanceYearTemplate===1;
     const user = {};
     const styles = Array.from({ length: nr }, () => Array.from({ length: nc }, () => ({})));
     const eachRange = (range, fn) => {
@@ -1334,14 +1334,14 @@
       if (fixed.n) st.n=fixed.n;
       const percent=!!(fixed.n && fixed.n.pattern.includes('%'));
       const isHeader = r===0 || (isOrders && row[0] === 'Sales 2' && row[1] === 'Sales Order');
-      st.ht=isHeader ? 2 : isOrders ? (c===0 ? 1 : [1,2,4,6,8].includes(c) ? 2 : 3) : [0,1,5].includes(c) ? 1 : percent ? 2 : 3;
+      st.ht=isHeader ? 2 : isOrders ? (c===0 ? 1 : [1,2,4,6,8].includes(c) ? 2 : 3) : (isYear?[0,1]:[0,1,5]).includes(c) ? 1 : percent ? 2 : 3;
       if(isHeader) st.cl={rgb:'#ffffff'};
       cleanGeneratedStyle(st);
       baseline[r+':'+c]=st;
       return {v:row[c]===0 || row[c]===undefined ? '' : row[c],s:st};
     }));
     sh.getRange(0,0,nr,nc).setValues(matrix);
-    const widths=Array.from({length:nc},(_,c)=>(isOrders ? [150,100,100,180,100,150,100,150,100] : [150,150,180,100,100,150])[c] || 150);
+    const widths=Array.from({length:nc},(_,c)=>isYear?([150,220,150,100,100][c]||130):(isOrders ? [150,100,100,180,100,150,100,150,100] : [150,150,180,100,100,150])[c] || 150);
     widths.forEach((w,c)=>sh.setColumnWidth(c,w));
     sh.showRows(0,nr);
     sh.setRowHeights(0,nr,30);
@@ -1740,7 +1740,7 @@
       renderCategoryTemplate(spec, sh);
       return;
     }
-    if (['销售业绩', '客户订单统计'].includes(spec.sheet) && !off) {
+    if ((spec.performanceYearTemplate||['销售业绩', '客户订单统计'].includes(spec.sheet)) && !off) {
       renderPerformanceTemplate(spec, sh);
       return;
     }
@@ -1945,6 +1945,12 @@
 
   async function statOptionFields(def) {
     const fields = [];
+    if(def.id==='salesPerformance'){
+      let batches=[];try{batches=await api('list_batches');}catch(e){}
+      const current=String(new Date().getFullYear());
+      const years=[...new Set([current,...(Array.isArray(batches)?batches:[]).map(b=>String(b.month||'').slice(0,4)).filter(y=>/^\d{4}$/.test(y))])].sort().reverse();
+      fields.push({key:'performanceYear',label:LANG==='zh'?'年份':'Year',type:'select',options:years,value:current});
+    }
     if (def.fields.includes('range')) {
       // 销售历史查询默认全部时间（Start/End 留空）；其他报表默认 TTM（滚动12个月）
       const allTime = def.fields.includes('salesHistory');
@@ -2003,6 +2009,13 @@
       if(['actBySales1','actByCity','actByType'].includes(def.id)) opts.fCust='';
     }
     if(def.id==='cabinetColors')S.statOpts[def.id]=Object.assign({},opts,{mode:opts.mode||'qty'});
+    // BCS_PERFORMANCE_YEAR_1
+    if(def.id==='salesPerformance'&&opts.performanceView==='year'){
+      const y=String(opts.performanceYear||new Date().getFullYear());
+      if(!/^\d{4}$/.test(y)){toast('请选择有效年份');return;}
+      opts=Object.assign({},opts,{performanceYear:y,start:y+'-01-01',end:y+'-12-31'});
+    }
+    if(def.id==='salesPerformance')S.statOpts[def.id]=Object.assign({},opts);
     const pf0 = performance.now();
     const annualNow = new Date();
     const annualWindow = annualNow.getFullYear() + '-' + annualNow.getMonth();
@@ -2010,10 +2023,10 @@
     const reusableAnnual = priorAnnual && !priorAnnual.saveFailed &&
       priorAnnual.annualAlgorithm === 2 && priorAnnual.annualWindow === annualWindow;
     const knownAnnualRevision = reusableAnnual ? priorAnnual.dataRevision || '' : '';
-    const performanceRange = JSON.stringify([opts.start || '', opts.end || '']);
+    const performanceRange = JSON.stringify([opts.start || '',opts.end || '',def.id==='salesPerformance'?(opts.performanceView||'detail'):'',def.id==='salesPerformance'&&opts.performanceView==='year'?opts.performanceYear:'']);
     const priorPerformance = def.id === 'salesPerformance' ? S.statResults[def.id] : null;
     const reusablePerformance = priorPerformance && !priorPerformance.saveFailed &&
-      priorPerformance.performanceAlgorithm === 2 && priorPerformance.performanceRange === performanceRange;
+      priorPerformance.performanceAlgorithm === 3 && priorPerformance.performanceRange === performanceRange;
     const knownPerformanceRevision = reusablePerformance ? priorPerformance.dataRevision || '' : '';
     const priorOrders = def.id === 'customerOrders' ? S.statResults[def.id] : null;
     const reusableOrders = priorOrders && !priorOrders.saveFailed &&
@@ -2039,13 +2052,13 @@
     const isProduct=['cabinetColors','stoneSales'].includes(def.id);
     const productRange=JSON.stringify([opts.start || '',opts.end || '',opts.type || 'SLAB',opts.includeUniversal===true,costVisible(),def.id==='cabinetColors'?(opts.mode||'qty'):'',def.id==='cabinetColors'?(opts.cabinetRangeKind||''):'']);
     const priorProduct=isProduct ? S.statResults[def.id]:null;
-    const reusableProduct=priorProduct && !priorProduct.saveFailed && priorProduct.productAlgorithm===2 && priorProduct.productRange===productRange && (def.id!=='cabinetColors'||priorProduct.cabinetColorMatrix===3&&priorProduct.colorRangeLabelVersion===2);
+    const reusableProduct=priorProduct && !priorProduct.saveFailed && priorProduct.productAlgorithm===2 && priorProduct.productRange===productRange && (def.id!=='cabinetColors'||priorProduct.cabinetColorMatrix===3&&priorProduct.colorRangeLabelVersion===2&&priorProduct.colorMonthHistoryVersion===1&&priorProduct.colorAllocationVersion===2);
     const knownProductRevision=reusableProduct ? priorProduct.dataRevision || '':'';
     const priorFast = reusableAnnual ? priorAnnual : reusablePerformance ? priorPerformance : reusableOrders ? priorOrders : reusableCategory ? priorCategory : reusableHistory ? priorHistory : reusableCustomerStats ? priorCustomerStats : reusableBatch ? priorBatch : reusableProduct ? priorProduct : null;
     S.ctxCache = null; // 每次重新生成都读取最新数据，避免把旧缓存保存成新报表。
     const ctx = getCtx(opts.start, opts.end) || await (async () => {
       const c = await normalizeCtx(def.id === 'annual' ? await api('get_annual_context', knownAnnualRevision) :
-        def.id === 'salesPerformance' ? await api('get_performance_context', opts.start || '', opts.end || '', knownPerformanceRevision) :
+        def.id === 'salesPerformance' ? (opts.performanceView==='year'?await api('get_performance_year_context',opts.performanceYear,knownPerformanceRevision):await api('get_performance_context', opts.start || '', opts.end || '', knownPerformanceRevision)) :
         def.id === 'customerOrders' ? await api('get_orders_context', opts.start || '', opts.end || '', knownOrdersRevision) :
         def.id === 'categoryQuery' ? await api('get_category_context', opts.start || '', opts.end || '', knownCategoryRevision) :
         def.id === 'salesHistory' ? await api('get_history_context', opts.start || '', opts.end || '', {custNo:opts.custNo,itemNo:opts.itemNo,invoice:opts.invoice,sales:opts.sales}, knownHistoryRevision) :
@@ -2170,7 +2183,7 @@
     if (def.id === 'salesPerformance') {
       spec.dataRevision = revision;
       spec.performanceRange = performanceRange;
-      spec.performanceAlgorithm = 2;
+      spec.performanceAlgorithm = 3;
     }
     S.yearToggle = spec.yearGroups ? { sheet: spec.sheet, groups: spec.yearGroups } : null;
     spec.stale = false;
@@ -2226,6 +2239,12 @@
     try {
       await ensureXlsxLib();
       const ws = XLSX.utils.aoa_to_sheet(spec.values);
+      if(spec.performanceYearTemplate){
+        ws['!cols']=spec.widths.map(x=>({wpx:x[1]}));
+        for(let r=1;r<spec.values.length;r++)for(let c=2;c<17;c++){
+          const cell=ws[XLSX.utils.encode_cell({r,c})];if(cell&&cell.t==='n')cell.z=[3,4].includes(c)?'0.00%;-0.00%;':'#,##0.00;-#,##0.00;';
+        }
+      }
       if(spec.cabinetColorMatrix===3){
         const nc=spec.values[0].length,money=spec.colorMetric==='amount';
         ws['!merges']=[{s:{r:0,c:0},e:{r:1,c:0}}];
@@ -2410,6 +2429,10 @@
     const actions = $('#stat-actions');
     actions.innerHTML = '';
     const btns = (def.actions || [{ labelKey: 'btnGenerate', opts: {} }]).map((ba) => ({ label: t(ba.labelKey), opts: ba.opts }));
+    if(def.id==='salesPerformance'){
+      btns[0].opts={performanceView:'detail'};
+      btns.push({label:LANG==='zh'?'年度总表':'Annual Summary',opts:{performanceView:'year'}});
+    }
     btns.push({ label: t('btnExport'), opts: null, export: true });
     btns.forEach((b) => {
       const el = document.createElement('button');
@@ -2437,7 +2460,7 @@
     }
     const cached = S.statResults[def.id];
     if(def.id==='categoryQuery' && cached && cached.categoryAlgorithm!==2){const mode=(S.statOpts[def.id]||{}).mode||'amount';await runStat(def,Object.assign({},collectStatOpts(def),{mode}),null);return;}
-    if(def.id==='cabinetColors' && cached && (cached.cabinetColorMatrix!==3||cached.colorRangeLabelVersion!==2||cached.colorRangeKind!==(S.statOpts[def.id]||{}).cabinetRangeKind)){await runStat(def,Object.assign({},collectStatOpts(def)),null);return;}
+    if(def.id==='cabinetColors' && cached && (cached.cabinetColorMatrix!==3||cached.colorRangeLabelVersion!==2||cached.colorMonthHistoryVersion!==1||cached.colorAllocationVersion!==2||cached.colorRangeKind!==(S.statOpts[def.id]||{}).cabinetRangeKind)){await runStat(def,Object.assign({},collectStatOpts(def)),null);return;}
     if(def.id==='salesAccount' && cached &&
        (cached.openingClock!==2 || cached.openingAsOf!==accountCalendarToday())) {
       await runStat(def,Object.assign({},collectStatOpts(def)),null);return;
@@ -2446,7 +2469,7 @@
     if(cached && PURCHASE_STATE_REPORT_IDS.includes(def.id) && cached.purchaseRuleVersion!==1){
       await runStat(def,Object.assign({},collectStatOpts(def)),null);return;
     }
-    if(def.id==='salesPerformance' && cached && (cached.stale || cached.performanceAlgorithm!==2)){
+    if(def.id==='salesPerformance' && cached && (cached.stale || cached.performanceAlgorithm!==3)){
       await runStat(def,Object.assign({},collectStatOpts(def)),null);return;
     }
     $('#stat-state').textContent = reportState(cached);
@@ -2819,6 +2842,7 @@
       vals[el.dataset.k] = el.type === 'checkbox' ? el.checked : el.value;
     });
     if(def.id==='cabinetColors'){vals.mode=(S.statOpts[def.id]||{}).mode||'qty';vals.cabinetRangeVersion=2;vals.cabinetRangeAll=!vals.start&&!vals.end;vals.cabinetRangeKind=vals.cabinetRangeAll?'all':(S.statOpts[def.id]||{}).cabinetRangeKind;}
+    if(def.id==='salesPerformance')vals.performanceView=(S.statOpts[def.id]||{}).performanceView||'detail';
     S.statOpts[def.id] = vals;
     return vals;
   }
