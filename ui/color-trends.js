@@ -1,4 +1,4 @@
-/* BCS_DYNAMIC_BARS_1; BCS_COLOR_TRENDS_8_RECONCILE; BCS_COLOR_TRENDS_7_ALLOCATION; BCS_COLOR_TRENDS_6_TABLES; BCS_COLOR_TRENDS_5_ALIGN; BCS_COLOR_TRENDS_4_WIDTHS; BCS_COLOR_TRENDS_3_CHARTS; BCS_COLOR_TRENDS_2_SUMMARY; BCS_COLOR_TRENDS_1 — fixed native tables; no spreadsheet style replay. */
+/* BCS_DYNAMIC_BARS_2_PAIRED; BCS_DYNAMIC_BARS_1; BCS_COLOR_TRENDS_8_RECONCILE; BCS_COLOR_TRENDS_7_ALLOCATION; BCS_COLOR_TRENDS_6_TABLES; BCS_COLOR_TRENDS_5_ALIGN; BCS_COLOR_TRENDS_4_WIDTHS; BCS_COLOR_TRENDS_3_CHARTS; BCS_COLOR_TRENDS_2_SUMMARY; BCS_COLOR_TRENDS_1 — fixed native tables; no spreadsheet style replay. */
 (function(){
 'use strict';
 const empty=()=>({qty:0,amount:0,rows:0});
@@ -125,8 +125,8 @@ function drawDetail(){
  $('years').innerHTML=table(cols(text('年份','Year')),pad(d.years.map(row)),totalRow(d.yearTotal));
  $('months').innerHTML=table(cols(text('月份','Month')),pad(d.months.map(row)),totalRow(d.monthTotal));
  const plots=[
-  {id:'qty',field:'qty',share:'qtyShare',name:text('销售数量','Quantity'),shareName:text('数量占比','Quantity %'),title:text('最近12个月销售数量','Quantity — last 12 months'),color:'#2456a6',shareColor:'#67a3e8',money:false},
-  {id:'amount',field:'amount',share:'amountShare',name:text('销售金额','Sales Amount'),shareName:text('金额占比','Amount %'),title:text('最近12个月销售金额','Sales amount — last 12 months'),color:'#dc921f',shareColor:'#f0b65e',money:true}
+  {id:'qty',field:'qty',share:'qtyShare',name:text('销售数量','Quantity'),shareName:text('数量占比','Quantity %'),title:text('最近12个月销售数量','Quantity — last 12 months'),color:'#2456a6',shareColor:'#e89016',money:false},
+  {id:'amount',field:'amount',share:'amountShare',name:text('销售金额','Sales Amount'),shareName:text('金额占比','Amount %'),title:text('最近12个月销售金额','Sales amount — last 12 months'),color:'#2456a6',shareColor:'#e89016',money:true}
  ];
  for(const p of plots){
   $('chart-'+p.id+'-title').textContent=p.title+' · '+selected;
@@ -138,8 +138,8 @@ function drawDetail(){
    yAxis:[{type:'value',name:p.name,axisLabel:{formatter:v=>Number(v).toLocaleString('en-US')},nameTextStyle:{fontSize:11}},
     {type:'value',name:p.shareName,axisLabel:{formatter:v=>(v*100).toFixed(0)+'%'},splitLine:{show:false},nameTextStyle:{fontSize:11}}],
    series:[
-    {name:p.name,type:chartType,barMaxWidth:42,yAxisIndex:0,connectNulls:false,symbol:'circle',symbolSize:5,lineStyle:{width:2},itemStyle:{color:p.color},tooltip:{valueFormatter:v=>fmt(v,p.money?'money':'qty')},data:d.months.map(r=>(r.rows||r.qtyShare!=null||r.amountShare!=null)?r[p.field]:null)},
-    {name:p.shareName,type:'line',yAxisIndex:1,connectNulls:false,symbol:'circle',symbolSize:4,lineStyle:{width:2,type:'dashed'},itemStyle:{color:p.shareColor},tooltip:{valueFormatter:v=>fmt(v,'pct')},data:d.months.map(r=>r[p.share])}
+    {name:p.name,type:chartType,barMaxWidth:22,yAxisIndex:0,connectNulls:false,symbol:'circle',symbolSize:5,lineStyle:{width:2},itemStyle:{color:p.color},tooltip:{valueFormatter:v=>fmt(v,p.money?'money':'qty')},data:d.months.map(r=>(r.rows||r.qtyShare!=null||r.amountShare!=null)?r[p.field]:null)},
+    {name:p.shareName,type:chartType,barMaxWidth:22,yAxisIndex:1,connectNulls:false,symbol:'circle',symbolSize:4,lineStyle:{width:2,type:'dashed'},itemStyle:{color:p.shareColor},tooltip:{valueFormatter:v=>fmt(v,'pct')},data:d.months.map(r=>r[p.share])}
    ]},true);chart.resize();
  }
 
