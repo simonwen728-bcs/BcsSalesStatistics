@@ -1485,7 +1485,7 @@
       return {v:row[c]===undefined||row[c]===0?'':row[c],s:st};
     }));
     sh.getMergeData().forEach(r=>r.breakApart());sh.getRange(0,0,nr,nc).setValues(matrix);
-    if(off){sh.getRange(0,0,1,nc).merge();if(off>1)sh.getRange(1,0,1,nc).merge();}
+    if(off){if(spec.cabinetColorMatrix===3)sh.getRange(0,1,1,nc-1).merge();else {sh.getRange(0,0,1,nc).merge();if(off>1)sh.getRange(1,0,1,nc).merge();}}
     sh.getRange(off,0,2,1).merge();
     for(let c=1;c+1<nc;c+=2)sh.getRange(off,c,1,2).merge();
     const widths=Array.from({length:nc},(_,c)=>c===0?200:c%2===0?80:120);
@@ -1698,13 +1698,13 @@
     } catch (e) { /* ignore */ }
     // 写入范围先算（clearSheet 尾巴清理要用；勿在使用后声明——TDZ）
     let values = spec.values;
-    const off = spec.info ? 2 : 0;
+    const off = spec.info ? (spec.cabinetColorMatrix===3?1:2) : 0;
     if (off) {
       // 报表头两行：标题（表名）+ 口径说明，其下才是表格；格式区域整体下移
       const width = Math.max(...spec.values.map((r) => r.length));
       const title = new Array(width).fill(''); title[0] = spec.sheet;
       const info = new Array(width).fill(''); info[0] = spec.info;
-      values = [title, info].concat(spec.values);
+      if(spec.cabinetColorMatrix===3){title[1]=spec.info;values=[title].concat(spec.values);}else values = [title, info].concat(spec.values);
     }
     const nr = values.length;
     const nc = Math.max(...values.map((r) => r.length));
@@ -1713,7 +1713,7 @@
     try {
       if (sh.getMaxRows() < need) sh.insertRows(sh.getMaxRows(), need - sh.getMaxRows());
     } catch (e) { /* ignore */ }
-    if(spec.cabinetColorMatrix===2){renderCabinetMonthlyTemplate(spec,sh,values,off);return;}
+    if(spec.cabinetColorMatrix===3){renderCabinetMonthlyTemplate(spec,sh,values,off);return;}
     if(spec.customerTemplate || ['橱柜颜色统计','石材销量统计'].includes(spec.sheet)){renderProductCustomerTemplate(spec,sh,values,off);return;}
     if(spec.salesQueryTemplate) {renderSalesQueryTemplate(spec,sh);return;}
     if (CUSTOMER_BATCH_SHEETS.includes(spec.sheet)) {
@@ -2030,7 +2030,7 @@
     const isProduct=['cabinetColors','stoneSales'].includes(def.id);
     const productRange=JSON.stringify([opts.start || '',opts.end || '',opts.type || 'SLAB',opts.includeUniversal===true,costVisible(),def.id==='cabinetColors'?(opts.mode||'qty'):'']);
     const priorProduct=isProduct ? S.statResults[def.id]:null;
-    const reusableProduct=priorProduct && !priorProduct.saveFailed && priorProduct.productAlgorithm===2 && priorProduct.productRange===productRange && (def.id!=='cabinetColors'||priorProduct.cabinetColorMatrix===2);
+    const reusableProduct=priorProduct && !priorProduct.saveFailed && priorProduct.productAlgorithm===2 && priorProduct.productRange===productRange && (def.id!=='cabinetColors'||priorProduct.cabinetColorMatrix===3);
     const knownProductRevision=reusableProduct ? priorProduct.dataRevision || '':'';
     const priorFast = reusableAnnual ? priorAnnual : reusablePerformance ? priorPerformance : reusableOrders ? priorOrders : reusableCategory ? priorCategory : reusableHistory ? priorHistory : reusableCustomerStats ? priorCustomerStats : reusableBatch ? priorBatch : reusableProduct ? priorProduct : null;
     S.ctxCache = null; // 每次重新生成都读取最新数据，避免把旧缓存保存成新报表。
@@ -2220,7 +2220,7 @@
     try {
       await ensureXlsxLib();
       const ws = XLSX.utils.aoa_to_sheet(spec.values);
-      if(spec.cabinetColorMatrix===2){
+      if(spec.cabinetColorMatrix===3){
         const nc=spec.values[0].length,money=spec.colorMetric==='amount';
         ws['!merges']=[{s:{r:0,c:0},e:{r:1,c:0}}];
         for(let c=1;c+1<nc;c+=2)ws['!merges'].push({s:{r:0,c},e:{r:0,c:c+1}});
@@ -2325,9 +2325,7 @@
     if(def.id==='cabinetColors'){
       if(!S.cabinetMatrixReady){S.statOpts[def.id].includeUniversal=false;S.cabinetMatrixReady=true;}
       if(!S.statOpts[def.id].cabinetRangeVersion && !S.statOpts[def.id].start && !S.statOpts[def.id].end){const r=ttmRange();S.statOpts[def.id].start=r.start;S.statOpts[def.id].end=r.end;}
-      const label=document.createElement('label');label.style.cssText='display:inline-flex;align-items:center;gap:5px;margin-right:8px;';
-      const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.dataset.k='includeUniversal';checkbox.checked=S.statOpts[def.id].includeUniversal===true;
-      label.appendChild(checkbox);label.appendChild(document.createTextNode(LANG==='zh'?'包含 Universal':'Include Universal'));box.appendChild(label);
+
     }
     // 快速时间段：上月 / 今年 / TTM / 重置（重置=不限时段即全部数据）
     if ((def.fields || []).includes('range')) {
@@ -2395,6 +2393,11 @@
         }
       }
     });
+    if(def.id==='cabinetColors'){
+      const label=document.createElement('label');label.style.cssText='display:inline-flex;align-items:center;gap:5px;margin-right:8px;';
+      const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.dataset.k='includeUniversal';checkbox.checked=S.statOpts[def.id].includeUniversal===true;
+      label.appendChild(checkbox);label.appendChild(document.createTextNode(LANG==='zh'?'包含 Universal':'Include Universal'));box.appendChild(label);
+    }
     // 功能按钮区：原 Sidebar 里每个板块的多个生成按钮 + 导出 Excel
     const actions = $('#stat-actions');
     actions.innerHTML = '';
@@ -2426,7 +2429,7 @@
     }
     const cached = S.statResults[def.id];
     if(def.id==='categoryQuery' && cached && cached.categoryAlgorithm!==2){const mode=(S.statOpts[def.id]||{}).mode||'amount';await runStat(def,Object.assign({},collectStatOpts(def),{mode}),null);return;}
-    if(def.id==='cabinetColors' && cached && cached.cabinetColorMatrix!==2){await runStat(def,Object.assign({},collectStatOpts(def)),null);return;}
+    if(def.id==='cabinetColors' && cached && cached.cabinetColorMatrix!==3){await runStat(def,Object.assign({},collectStatOpts(def)),null);return;}
     if(def.id==='salesAccount' && cached &&
        (cached.openingClock!==2 || cached.openingAsOf!==accountCalendarToday())) {
       await runStat(def,Object.assign({},collectStatOpts(def)),null);return;
