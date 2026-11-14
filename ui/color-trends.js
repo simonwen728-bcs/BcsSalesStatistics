@@ -1,4 +1,4 @@
-/* BCS_COLOR_TRENDS_6_TABLES; BCS_COLOR_TRENDS_5_ALIGN; BCS_COLOR_TRENDS_4_WIDTHS; BCS_COLOR_TRENDS_3_CHARTS; BCS_COLOR_TRENDS_2_SUMMARY; BCS_COLOR_TRENDS_1 — fixed native tables; no spreadsheet style replay. */
+/* BCS_COLOR_TRENDS_7_ALLOCATION; BCS_COLOR_TRENDS_6_TABLES; BCS_COLOR_TRENDS_5_ALIGN; BCS_COLOR_TRENDS_4_WIDTHS; BCS_COLOR_TRENDS_3_CHARTS; BCS_COLOR_TRENDS_2_SUMMARY; BCS_COLOR_TRENDS_1 — fixed native tables; no spreadsheet style replay. */
 (function(){
 'use strict';
 const empty=()=>({qty:0,amount:0,rows:0});
@@ -10,15 +10,50 @@ function compute(sales,reps,opts){
  const group=new Map((reps?.s1||[]).map(r=>[key(r.code),key(r.group)]));
  const latest=sales.reduce((m,r)=>{const d=validDate(r.soldDate);return d>m?d:m;},'');
  const cutoff=opts.end && opts.end<latest?opts.end:latest;
- const colors=new Map(),months=new Map(),years=new Map();let total=empty();
+ const colors=new Map(),months=new Map(),years=new Map(),buckets=new Map();let total=empty();
+ const addMap=(map,k,q,a)=>{if(!map.has(k))map.set(k,empty());add(map.get(k),q,a);};
  for(const r of sales){
   const d=validDate(r.soldDate),type=key(r.type).replace(/\s/g,'');
   if(!d||!cutoff||d>cutoff||!['CABINET','CABINETOTHERS'].includes(type)||key(r.rep1)==='IC'||group.get(key(r.rep1))==='IC')continue;
-  const name=key(r.color)||'(空白)';if(name==='UNIVERSAL'&&!opts.includeUniversal)continue;
-  let c=colors.get(name);if(!c){c={name,period:empty(),months:new Map(),years:new Map()};colors.set(name,c);}
-  const q=number(r.qty),a=number(r.amount),m=d.slice(0,7),y=d.slice(0,4);
-  for(const [map,k] of [[months,m],[years,y],[c.months,m],[c.years,y]]){if(!map.has(k))map.set(k,empty());add(map.get(k),q,a);}
-  if((!opts.start||d>=opts.start)&&(!opts.end||d<=opts.end)){add(c.period,q,a);add(total,q,a);}
+  const name=key(r.color)||'(空白)',q=number(r.qty),a=number(r.amount),item=key(r.itemNo)||'(NO ITEM)';
+  const keys=[d.slice(0,7),d.slice(0,4)];if(!opts.start||d>=opts.start)keys.push('区间');
+  for(const k of keys){
+   if(!buckets.has(k))buckets.set(k,{normal:new Map(),items:new Map(),universal:new Map()});
+   const b=buckets.get(k);
+   if(name==='UNIVERSAL')addMap(b.universal,item,q,a);
+   else {addMap(b.normal,name,q,a);if(!b.items.has(item))b.items.set(item,new Map());addMap(b.items.get(item),name,q,a);}
+  }
+ }
+ const post=(name,k,q,a)=>{
+  if(!colors.has(name))colors.set(name,{name,period:empty(),months:new Map(),years:new Map()});const c=colors.get(name);
+  if(k==='区间'){add(c.period,q,a);add(total,q,a);}
+  else {const cm=k.length===7?c.months:c.years,tm=k.length===7?months:years;addMap(cm,k,q,a);addMap(tm,k,q,a);}
+ };
+    const split=(weights,target,integer)=>{
+      const total=weights.reduce((s,w)=>s+w[1],0);if(!total||!target)return [];
+      const sign=target<0?-1:1,abs=Math.abs(target);
+      const out=weights.map(([key,w],i)=>{const exact=abs*w/total;return {key,i,v:integer?Math.floor(exact):exact,frac:exact-Math.floor(exact)};});
+      if(integer){let rest=Math.round(abs)-out.reduce((s,x)=>s+x.v,0);const sorted=[...out].sort((a,b)=>b.frac-a.frac||a.i-b.i);for(let i=0;i<rest;i++)sorted[i%sorted.length].v++;}
+      else if(out.length)out[out.length-1].v=abs-out.slice(0,-1).reduce((s,x)=>s+x.v,0);
+      return out.map(x=>[x.key,sign*x.v]);
+    };
+
+ for(const [k,b] of buckets){
+  for(const [c,v] of b.normal)post(c,k,v.qty,v.amount);
+  for(const [item,u] of b.universal){
+   if(opts.includeUniversal){post('UNIVERSAL',k,u.qty,u.amount);continue;}
+   const weights=field=>{
+    for(const map of [b.items.get(item),b.normal]){
+     if(!map)continue;
+     const w=[...map].map(([c,v])=>[c,Math.abs(field==='amount'?(v.amount||v.qty):v.qty)]);
+     if(w.some(x=>x[1]>0))return w;
+    }
+    return [...b.normal].map(([c])=>[c,1]);
+   };
+   if(!b.normal.size&&(u.qty||u.amount))throw Error('Universal分摊缺少颜色参照：'+k+' / '+item);
+   for(const [c,q] of split(weights('qty'),Math.round(u.qty),true))post(c,k,q,0);
+   for(const [c,a] of split(weights('amount'),u.amount,false))post(c,k,0,a);
+  }
  }
  const ratio=(value,denom)=>denom && denom!==0?value/denom:null;
  const metrics=(v,denom)=>({qty:v.qty,amount:v.amount,qtyShare:ratio(v.qty,denom.qty),amountShare:ratio(v.amount,denom.amount),rows:v.rows});
@@ -99,15 +134,15 @@ function recalc(){
  if(!data.list.some(r=>r.name===selected))selected=data.list[0]?.name||'';
  $('list-title').textContent=text('颜色列表','Color list')+' · '+(start||text('最早','First'))+' — '+(end||data.latest||'—');
  drawList();drawDetail();
- $('state').textContent=text('销售数据截止 ','Sales data through ')+(data.latest||'—')+' · '+text('右侧统计截止 ','Detail through ')+(data.cutoff||'—')+' · '+text('已更新 ','Updated ')+((performance.now()-t)/1000).toFixed(2)+'s';
+ $('state').textContent=text('耗时 ','Time ')+((performance.now()-t)/1000).toFixed(2)+'s';
 }
 async function refresh(){
- const request=++seq,token=cfg.token();$('refresh').disabled=true;$('state').textContent=text('正在检查最新数据…','Checking latest data…');
+ const started=performance.now(),request=++seq,token=cfg.token();$('refresh').disabled=true;$('state').textContent=text('正在检查最新数据…','Checking latest data…');
  try{
   const res=await cfg.normalize(await cfg.api('get_product_context','','',ctx&&ctxToken===token?revision:''));
   if(request!==seq)return;
   if(!res.unchanged){ctx=res;revision=res.revision;ctxToken=token;}
-  if(!ctx)throw Error('No source data');recalc();
+  if(!ctx)throw Error('No source data');recalc();$('state').textContent=text('耗时 ','Time ')+((performance.now()-started)/1000).toFixed(2)+'s';
  }catch(e){if(request===seq){$('state').textContent=text('读取失败，请重试：','Load failed; retry: ')+(e.message||e);$('list').replaceChildren();$('years').replaceChildren();$('months').replaceChildren();Object.values(charts).forEach(chart=>chart.clear());}}
  finally{if(request===seq)$('refresh').disabled=false;}
 }
@@ -118,9 +153,9 @@ function quick(kind){
 }
 function mount(){
  host=document.createElement('section');host.id='page-color-dashboard';host.className='page';host.style.display='none';
- host.innerHTML='<div class="ct-toolbar"><b>'+text('橱柜颜色动态','Cabinet Color Trends')+'</b><input id="ct-search" type="search" placeholder="'+text('搜索颜色…','Search colors…')+'"><button class="btn sm" id="ct-last">'+text('上月','Last month')+'</button><button class="btn sm" id="ct-year">'+text('今年','This year')+'</button><button class="btn sm" id="ct-ttm">TTM</button><button class="btn sm" id="ct-all">'+text('全部历史','All history')+'</button><label>'+text('开始','Start')+' <input id="ct-start" type="date"></label><label>'+text('结束','End')+' <input id="ct-end" type="date"></label><label><input id="ct-universal" type="checkbox"> '+text('包含 Universal','Include Universal')+'</label><button class="btn sm" id="ct-refresh">'+text('刷新数据','Refresh')+'</button></div><div class="ct-note">'+text('排除 IC；默认排除 Universal，不作分摊。占比分母为同一期间全部参与统计的橱柜颜色；退货按负数计入。','IC excluded. Universal excluded by default, without allocation. Shares use all included colors in the same period; returns deducted.')+'</div><div id="ct-state" role="status"></div><div class="ct-grid"><div class="ct-left"><b id="ct-list-title"></b><div id="ct-list" class="ct-table"></div></div><div class="ct-right"><b id="ct-selected"></b><div class="ct-analysis"><div id="ct-years" class="ct-table"></div><div id="ct-months" class="ct-table"></div></div><div class="ct-charts"><div class="ct-chart-panel"><div id="ct-chart-qty-title" class="ct-chart-title"></div><div id="ct-chart-qty" class="ct-chart"></div></div><div class="ct-chart-panel"><div id="ct-chart-amount-title" class="ct-chart-title"></div><div id="ct-chart-amount" class="ct-chart"></div></div></div></div></div>';
+ host.innerHTML='<div class="ct-toolbar"><b>'+text('橱柜颜色动态','Cabinet Color Trends')+'</b><input id="ct-search" type="search" placeholder="'+text('搜索颜色…','Search colors…')+'"><button class="btn sm" id="ct-last">'+text('上月','Last month')+'</button><button class="btn sm" id="ct-year">'+text('今年','This year')+'</button><button class="btn sm" id="ct-ttm">TTM</button><button class="btn sm" id="ct-all">'+text('全部历史','All history')+'</button><label>'+text('开始','Start')+' <input id="ct-start" type="date"></label><label>'+text('结束','End')+' <input id="ct-end" type="date"></label><label><input id="ct-universal" type="checkbox"> '+text('包含 Universal','Include Universal')+'</label><button class="btn sm" id="ct-refresh">'+text('刷新数据','Refresh')+'</button><span id="ct-state" role="status"></span></div><div class="ct-grid"><div class="ct-left"><b id="ct-list-title"></b><div id="ct-list" class="ct-table"></div></div><div class="ct-right"><b id="ct-selected"></b><div class="ct-analysis"><div id="ct-years" class="ct-table"></div><div id="ct-months" class="ct-table"></div></div><div class="ct-charts"><div class="ct-chart-panel"><div id="ct-chart-qty-title" class="ct-chart-title"></div><div id="ct-chart-qty" class="ct-chart"></div></div><div class="ct-chart-panel"><div id="ct-chart-amount-title" class="ct-chart-title"></div><div id="ct-chart-amount" class="ct-chart"></div></div></div></div></div>';
  document.querySelector('main').appendChild(host);
- const style=document.createElement('style');style.textContent=`#page-color-dashboard{padding:10px 12px;gap:8px;min-height:0;flex:1;overflow:hidden}.ct-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:#edf3fb;padding:8px;border-radius:6px}.ct-toolbar input{border:1px solid #cbd5e1;border-radius:4px;height:28px;padding:3px}.ct-toolbar label{white-space:nowrap}.ct-toolbar input[type=checkbox]{vertical-align:middle}.ct-note,#ct-state{font-size:12px;color:#52657d}.ct-grid{display:flex;gap:10px;flex:1;min-height:0}.ct-left{flex:0 0 30%;display:flex;flex-direction:column;gap:8px;min-height:0;min-width:0}#ct-list{flex:1;min-height:0}#ct-list-title{font-size:13px;color:#174779}.ct-right{display:flex;flex-direction:column;gap:8px;min-width:0;flex:1;min-height:0}#ct-selected{font-size:17px;color:#174779}.ct-analysis{display:flex;gap:8px;flex:0 1 425px;max-height:57%;min-height:180px}.ct-analysis>.ct-table{flex:1;min-width:0}.ct-table{display:flex;flex-direction:column;overflow:hidden;border:1px solid #cbd5e1;border-radius:6px;background:white}.ct-scroll{flex:1;min-height:0;overflow:auto;scrollbar-gutter:stable}.ct-footer{flex:0 0 auto;overflow:hidden;scrollbar-gutter:stable}.ct-table table{width:100%;min-width:0;table-layout:fixed;border-collapse:separate;border-spacing:0;font:13px Arial,sans-serif;color:#182330}.ct-table th,.ct-table td{height:30px;padding:4px 6px;border-right:1px solid #cbd5e1;border-bottom:1px solid #cbd5e1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ct-table th{white-space:normal;overflow-wrap:break-word;line-height:15px;position:sticky;top:0;background:#d9eaf7;text-align:center;z-index:2;font-size:12px}.ct-table tfoot td{position:sticky;bottom:0;background:#d9e6f3;font-weight:bold}.ct-table .ct-money{text-align:right}.ct-table .ct-center{text-align:center}#ct-list table{min-width:0}.ct-analysis td:first-child{text-align:center}#ct-list tbody tr{cursor:pointer}#ct-list tbody tr:hover{background:#f0f5ff}#ct-list .ct-selected{background:#dbeafe}.ct-charts{display:flex;flex:1;gap:8px;min-height:190px}.ct-chart-panel{display:flex;flex:1;min-width:0;min-height:180px;flex-direction:column;background:white;border:1px solid #cbd5e1;border-radius:6px;padding:8px}.ct-chart{flex:1;min-height:160px}.ct-chart-title{font-weight:bold;color:#174779;font-size:13px}@media(max-width:1000px){.ct-grid{overflow:auto;flex-direction:column}.ct-left{flex:0 0 280px}.ct-right{min-height:650px}.ct-analysis{max-height:none;flex:0 0 400px}.ct-charts{flex-direction:column;flex:0 0 500px}.ct-right{min-height:960px}}`;
+ const style=document.createElement('style');style.textContent=`#page-color-dashboard{padding:10px 12px;gap:8px;min-height:0;flex:1;overflow:hidden}.ct-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:#edf3fb;padding:8px;border-radius:6px}.ct-toolbar input{border:1px solid #cbd5e1;border-radius:4px;height:28px;padding:3px}.ct-toolbar label{white-space:nowrap}.ct-toolbar input[type=checkbox]{vertical-align:middle}#ct-state{font-size:12px;color:#52657d;white-space:nowrap}.ct-grid{display:flex;gap:10px;flex:1;min-height:0}.ct-left{flex:0 0 30%;display:flex;flex-direction:column;gap:8px;min-height:0;min-width:0}#ct-list{flex:1;min-height:0}#ct-list-title{font-size:13px;color:#174779}.ct-right{display:flex;flex-direction:column;gap:8px;min-width:0;flex:1;min-height:0}#ct-selected{font-size:17px;color:#174779}.ct-analysis{display:flex;gap:8px;flex:0 1 425px;max-height:57%;min-height:180px}.ct-analysis>.ct-table{flex:1;min-width:0}.ct-table{display:flex;flex-direction:column;overflow:hidden;border:1px solid #cbd5e1;border-radius:6px;background:white}.ct-scroll{flex:1;min-height:0;overflow:auto;scrollbar-gutter:stable}.ct-footer{flex:0 0 auto;overflow:hidden;scrollbar-gutter:stable}.ct-table table{width:100%;min-width:0;table-layout:fixed;border-collapse:separate;border-spacing:0;font:13px Arial,sans-serif;color:#182330}.ct-table th,.ct-table td{height:30px;padding:4px 6px;border-right:1px solid #cbd5e1;border-bottom:1px solid #cbd5e1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ct-table th{white-space:normal;overflow-wrap:break-word;line-height:15px;position:sticky;top:0;background:#d9eaf7;text-align:center;z-index:2;font-size:12px}.ct-table tfoot td{position:sticky;bottom:0;background:#d9e6f3;font-weight:bold}.ct-table .ct-money{text-align:right}.ct-table .ct-center{text-align:center}#ct-list table{min-width:0}.ct-analysis td:first-child{text-align:center}#ct-list tbody tr{cursor:pointer}#ct-list tbody tr:hover{background:#f0f5ff}#ct-list .ct-selected{background:#dbeafe}.ct-charts{display:flex;flex:1;gap:8px;min-height:190px}.ct-chart-panel{display:flex;flex:1;min-width:0;min-height:180px;flex-direction:column;background:white;border:1px solid #cbd5e1;border-radius:6px;padding:8px}.ct-chart{flex:1;min-height:160px}.ct-chart-title{font-weight:bold;color:#174779;font-size:13px}@media(max-width:1000px){.ct-grid{overflow:auto;flex-direction:column}.ct-left{flex:0 0 280px}.ct-right{min-height:650px}.ct-analysis{max-height:none;flex:0 0 400px}.ct-charts{flex-direction:column;flex:0 0 500px}.ct-right{min-height:960px}}`;
  document.head.appendChild(style);
  $('search').oninput=()=>data&&drawList();$('refresh').onclick=refresh;
  for(const k of ['start','end','universal'])$(k).onchange=recalc;

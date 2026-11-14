@@ -650,10 +650,19 @@
   }
   function reportState(spec) {
     if (!spec) return t('statNotGen');
-    return tf('statStateDone', { t: spec.doneAt || '' }) +
+    let label = tf('statStateDone', { t: spec.doneAt || '' }) +
       (spec.saveFailed ? (LANG === 'zh' ? ' · 保存失败，请重新生成重试' : ' · Save failed; generate again to retry') :
        spec.stale ? (LANG === 'zh' ? ' · 数据已更新，请重新生成' : ' · Data changed; please regenerate') :
        (LANG === 'zh' ? ' · 已保存' : ' · Saved'));
+    // BCS_REPORT_TIMING_STATUS_1
+    const p=spec.perf;
+    if(p && [p.ctx,p.calc,p.render].every(Number.isFinite)){
+      label+='（'+tf('statTiming',{a:p.ctx.toFixed(1),b:p.calc.toFixed(1),c:p.render.toFixed(1)})+'）';
+      if(Number.isFinite(p.save))label+=(LANG==='zh'?' · 保存 ':' · Save ')+p.save.toFixed(1)+'s';
+      const total=Number.isFinite(p.total)?p.total:p.ctx+p.calc+p.render;
+      label+=(LANG==='zh'?' · 耗时 ':' · Time ')+total.toFixed(1)+'s';
+    }
+    return label;
   }
 
   // ================= loading 反馈 =================
@@ -2028,9 +2037,9 @@
     const reusableBatch=priorBatch && !priorBatch.saveFailed && priorBatch.customerBatchAlgorithm===1 && (!PURCHASE_STATE_REPORT_IDS.includes(def.id) || priorBatch.purchaseRuleVersion===1) && priorBatch.customerBatchRange===batchRange && (def.id!=='salesAccount' || (priorBatch.openingClock===2 && priorBatch.openingAsOf===accountCalendarToday()));
     const knownBatchRevision=reusableBatch ? priorBatch.dataRevision || '' : '';
     const isProduct=['cabinetColors','stoneSales'].includes(def.id);
-    const productRange=JSON.stringify([opts.start || '',opts.end || '',opts.type || 'SLAB',opts.includeUniversal===true,costVisible(),def.id==='cabinetColors'?(opts.mode||'qty'):'']);
+    const productRange=JSON.stringify([opts.start || '',opts.end || '',opts.type || 'SLAB',opts.includeUniversal===true,costVisible(),def.id==='cabinetColors'?(opts.mode||'qty'):'',def.id==='cabinetColors'?(opts.cabinetRangeKind||''):'']);
     const priorProduct=isProduct ? S.statResults[def.id]:null;
-    const reusableProduct=priorProduct && !priorProduct.saveFailed && priorProduct.productAlgorithm===2 && priorProduct.productRange===productRange && (def.id!=='cabinetColors'||priorProduct.cabinetColorMatrix===3);
+    const reusableProduct=priorProduct && !priorProduct.saveFailed && priorProduct.productAlgorithm===2 && priorProduct.productRange===productRange && (def.id!=='cabinetColors'||priorProduct.cabinetColorMatrix===3&&priorProduct.colorRangeLabelVersion===2);
     const knownProductRevision=reusableProduct ? priorProduct.dataRevision || '':'';
     const priorFast = reusableAnnual ? priorAnnual : reusablePerformance ? priorPerformance : reusableOrders ? priorOrders : reusableCategory ? priorCategory : reusableHistory ? priorHistory : reusableCustomerStats ? priorCustomerStats : reusableBatch ? priorBatch : reusableProduct ? priorProduct : null;
     S.ctxCache = null; // 每次重新生成都读取最新数据，避免把旧缓存保存成新报表。
@@ -2182,10 +2191,7 @@
     renderStatExtra(def);
     const st = document.getElementById('stat-state');
     if (st) {
-      let txt = reportState(spec);
-      if (spec.perf) txt += '（' + tf('statTiming', { a: spec.perf.ctx.toFixed(1), b: spec.perf.calc.toFixed(1), c: spec.perf.render.toFixed(1) }) + '）';
-      txt += LANG === 'zh' ? ' · 保存 ' + spec.perf.save.toFixed(1) + 's · 总计 ' + spec.perf.total.toFixed(1) + 's' : ' · Save ' + spec.perf.save.toFixed(1) + 's · Total ' + spec.perf.total.toFixed(1) + 's';
-      st.textContent = txt;
+      st.textContent = reportState(spec);
     }
     if (btn) {
       document.querySelectorAll('#stat-actions button').forEach((b) => b.classList.remove('triggered'));
@@ -2324,7 +2330,7 @@
     // BCS_CABINET_MONTHLY_MATRIX_1
     if(def.id==='cabinetColors'){
       if(!S.cabinetMatrixReady){S.statOpts[def.id].includeUniversal=false;S.cabinetMatrixReady=true;}
-      if(!S.statOpts[def.id].cabinetRangeVersion && !S.statOpts[def.id].start && !S.statOpts[def.id].end){const r=ttmRange();S.statOpts[def.id].start=r.start;S.statOpts[def.id].end=r.end;}
+      if(!S.cabinetRangeDefaultReady){const r=ttmRange();S.statOpts[def.id].start=r.start;S.statOpts[def.id].end=r.end;S.statOpts[def.id].cabinetRangeKind='ttm';S.cabinetRangeDefaultReady=true;} // BCS_CABINET_DEFAULT_TTM_2
 
     }
     // 快速时间段：上月 / 今年 / TTM / 重置（重置=不限时段即全部数据）
@@ -2356,6 +2362,7 @@
           // 快速段回调可返回 Date 或已格式化的日期字符串（ttmRange 返回字符串），统一归一
           const fmt = (v) => (v instanceof Date ? isoDate(v) : String(v || ''));
           setRange(fmt(pair[0]), fmt(pair[1]));
+          if(def.id==='cabinetColors')S.statOpts[def.id].cabinetRangeKind=({quickLM:'last',quickTY:'year',quickTTM:'ttm',quickReset:'all'})[key]||'all';
         };
         quick.appendChild(b);
       });
@@ -2373,6 +2380,7 @@
       row.querySelectorAll('[data-k]').forEach((el) => {
         el.addEventListener('change', () => {
           S.statOpts[def.id][el.dataset.k] = el.value;
+          if(def.id==='cabinetColors'&&['start','end'].includes(el.dataset.k))S.statOpts[def.id].cabinetRangeKind='custom';
         });
       });
       box.appendChild(row);
@@ -2429,7 +2437,7 @@
     }
     const cached = S.statResults[def.id];
     if(def.id==='categoryQuery' && cached && cached.categoryAlgorithm!==2){const mode=(S.statOpts[def.id]||{}).mode||'amount';await runStat(def,Object.assign({},collectStatOpts(def),{mode}),null);return;}
-    if(def.id==='cabinetColors' && cached && cached.cabinetColorMatrix!==3){await runStat(def,Object.assign({},collectStatOpts(def)),null);return;}
+    if(def.id==='cabinetColors' && cached && (cached.cabinetColorMatrix!==3||cached.colorRangeLabelVersion!==2||cached.colorRangeKind!==(S.statOpts[def.id]||{}).cabinetRangeKind)){await runStat(def,Object.assign({},collectStatOpts(def)),null);return;}
     if(def.id==='salesAccount' && cached &&
        (cached.openingClock!==2 || cached.openingAsOf!==accountCalendarToday())) {
       await runStat(def,Object.assign({},collectStatOpts(def)),null);return;
@@ -2810,7 +2818,7 @@
     $('#stat-cond-fields').querySelectorAll('[data-k]').forEach((el) => {
       vals[el.dataset.k] = el.type === 'checkbox' ? el.checked : el.value;
     });
-    if(def.id==='cabinetColors'){vals.mode=(S.statOpts[def.id]||{}).mode||'qty';vals.cabinetRangeVersion=2;vals.cabinetRangeAll=!vals.start&&!vals.end;}
+    if(def.id==='cabinetColors'){vals.mode=(S.statOpts[def.id]||{}).mode||'qty';vals.cabinetRangeVersion=2;vals.cabinetRangeAll=!vals.start&&!vals.end;vals.cabinetRangeKind=vals.cabinetRangeAll?'all':(S.statOpts[def.id]||{}).cabinetRangeKind;}
     S.statOpts[def.id] = vals;
     return vals;
   }

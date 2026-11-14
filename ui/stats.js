@@ -894,7 +894,17 @@ window.STATS = (function () {
     if(!names.length)return {error:'NO_DATA'};
     const spec=baseSpec(mode==='amount'?'橱柜颜色金额统计':'橱柜颜色数量统计');
     spec.cabinetColorMatrix=3;spec.colorRangeStart=intervalStart;spec.colorRangeEnd=intervalEnd;spec.colorMetric=mode;spec.colorPeriods=periods;spec.colorCutoff=cutoff;
-    spec.values=[['颜色',...periods.flatMap(p=>[p,''])],['',...periods.flatMap(()=>[mode==='amount'?'销售金额':'销售数量','占比'])]];
+    // BCS_CABINET_RANGE_LABEL_1
+    const rangeNames={ttm:'TTM',last:'上月',year:'今年',all:'全部',custom:'自定义'};
+    let kind=opts.cabinetRangeKind;
+    if(!rangeNames[kind]){
+      const first=cutoff.slice(0,7)+'-01';
+      kind=useDefault?'ttm':!opts.start&&!opts.end?'all':opts.start===defaultStart?'ttm':opts.start===cutoff.slice(0,4)+'-01-01'?'year':opts.start===first?'last':'custom';
+    }
+    spec.colorRangeLabelVersion=2;
+    spec.colorRangeKind=kind;
+    const intervalHeader='区间（'+rangeNames[kind]+'）';
+    spec.values=[['颜色',...periods.flatMap(p=>[p==='区间'?intervalHeader:p,''])],['',...periods.flatMap(()=>[mode==='amount'?'销售金额':'销售数量','占比'])]];
     names.forEach(c=>spec.values.push([c,...periods.flatMap(p=>{
       const v=colors.get(c).get(p),denom=totals.get(p);
       return [v?v[mode]:0,denom&&denom[mode]!==0?(v?v[mode]:0)/denom[mode]:''];
