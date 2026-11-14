@@ -1989,6 +1989,7 @@
   }
 
   async function runStat(def, opts, btn) {
+    window.BCSReportTrends?.hide();
     const btns = Array.from(document.querySelectorAll('#stat-actions button'));
     btns.forEach((b) => (b.disabled = true));
     statOverlay(true, t('loadingGen'));
@@ -2227,7 +2228,7 @@
 
   async function exportStatResult(def) {
     if(costToken && !await checkCostAccess())return;
-    const spec = hideCostColumn(S.statResults[def.id]);
+    const spec = window.BCSReportTrends?.exportSpec() || hideCostColumn(S.statResults[def.id]);
     annualHeaderLayout(spec);
     if (!spec || !spec.values || !spec.values.length) { toast(t('exportEmpty')); return; }
     // 先走后端接口（本地 exe 版桥接实现）；远程版后端无此接口，失败后走浏览器本地导出
@@ -2239,6 +2240,10 @@
     try {
       await ensureXlsxLib();
       const ws = XLSX.utils.aoa_to_sheet(spec.values);
+      if(window.BCSReportTrends?.exportSpec()===spec){
+        ws['!cols']=[{wpx:150},{wpx:180}];
+        for(let r=1;r<spec.values.length;r++){const cell=ws[XLSX.utils.encode_cell({r,c:1})];if(cell&&cell.t==='n')cell.z='#,##0.00;-#,##0.00;';}
+      }
       if(spec.performanceYearTemplate){
         ws['!cols']=spec.widths.map(x=>({wpx:x[1]}));
         for(let r=1;r<spec.values.length;r++)for(let c=2;c<17;c++){
@@ -2324,6 +2329,7 @@
   }
 
   async function renderStatCardInner(def, tk) {
+    window.BCSReportTrends?.hide();
     const def2 = def;
     if (!def2) return;
     S.reportsLoaded = S.reportsLoaded || {};
@@ -2433,6 +2439,7 @@
       btns[0].opts={performanceView:'detail'};
       btns.push({label:LANG==='zh'?'年度总表':'Annual Summary',opts:{performanceView:'year'}});
     }
+    if(['salesPerformance','annual'].includes(def.id))btns.push({label:LANG==='zh'?'业绩曲线':'Sales Trend',chart:true});
     btns.push({ label: t('btnExport'), opts: null, export: true });
     btns.forEach((b) => {
       const el = document.createElement('button');
@@ -2440,6 +2447,14 @@
       el.textContent = b.label;
       el.onclick = () => {
         if (b.export) { exportStatResult(def); return; }
+        if(b.chart){
+          const opts=collectStatOpts(def),year=String(opts.performanceYear||new Date().getFullYear());
+          const years=[...document.querySelectorAll('[data-k="performanceYear"] option')].map(e=>e.value);
+          window.BCSReportTrends.show({kind:def.id==='annual'?'annual':'performance',zh:LANG==='zh',year,years:years.length?years:[year],active:()=>S.nav==='r:'+def.id,
+            load:async y=>normalizeCtx(await api(y?'get_performance_year_context':'get_annual_context',...(y?[y]:[]))),
+            build:(ctx,y)=>STATS.salesPerformance(ctx.sales||[],{performanceView:'year',performanceYear:y,reps:ctx.reps},t)});
+          return;
+        }
         runStat(def, Object.assign({}, collectStatOpts(def), b.opts), el);
       };
       actions.appendChild(el);
@@ -2769,6 +2784,7 @@
       const hub = STAT_HUBS.find((h) => h.id === id.slice(4));
       id = 'r:' + (hub && hub.reports[0] ? hub.reports[0].id : 'salesPerformance');
     }
+    window.BCSReportTrends?.hide();
     S.nav = id;
     document.getElementById('sales-query-summary').style.display = id === 'sales' && hasSalesSummaryFilter() ? 'flex' : 'none';
     const isReport = id.startsWith('r:');
