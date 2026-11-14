@@ -3221,17 +3221,25 @@
     const totalName = LANG === 'zh' ? '总金额' : 'Total';
     const cabName = LANG === 'zh' ? '橱柜金额' : 'Cabinet';
     const stoneName = LANG === 'zh' ? '石材金额' : 'Stone';
-    // 原表图表为折线图：总金额/橱柜金额/石材金额 三条线，图例在顶部，月份斜排
+    // BCS_DYNAMIC_BARS_1: grouped amounts, never stack total with its components.
+    const chartType=S.dash.chartType||'bar';
+    const title=document.getElementById('dash-chart-title');
+    if(title){
+      let buttons=document.getElementById('dash-chart-types');
+      if(!buttons){buttons=document.createElement('span');buttons.id='dash-chart-types';buttons.style.cssText='float:right;display:inline-flex;gap:4px';title.appendChild(buttons);}
+      buttons.innerHTML=['bar','line'].map(k=>'<button class="btn sm'+(chartType===k?' primary':'')+'" data-dash-chart="'+k+'" aria-pressed="'+(chartType===k)+'">'+(LANG==='zh'?(k==='bar'?'柱状图':'折线图'):(k==='bar'?'Bar':'Line'))+'</button>').join('');
+      buttons.querySelectorAll('button').forEach(button=>button.onclick=()=>{S.dash.chartType=button.dataset.dashChart;renderDashChart();});
+    }
     S.dash.chart.setOption({
-      tooltip: { trigger: 'axis' },
+      tooltip: { trigger: 'axis',axisPointer:{type:chartType==='bar'?'shadow':'line'},valueFormatter:v=>v==null?'—':Number(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) },
       legend: { data: [totalName, cabName, stoneName], top: 0 },
       grid: { left: 10, right: 16, top: 34, bottom: 10, containLabel: true },
-      xAxis: { type: 'category', boundaryGap: false, data: dd.monthKeys, axisLabel: { rotate: 40 } },
+      xAxis: { type: 'category', boundaryGap: chartType==='bar', data: dd.monthKeys, axisLabel: { rotate: 40 } },
       yAxis: { type: 'value', axisLabel: { formatter: (v) => Number(v).toLocaleString('en-US') }, name: LANG === 'zh' ? '销售金额' : 'Amount', nameLocation: 'middle', nameGap: 46 },
       series: [
-        { name: totalName, type: 'line', smooth: false, symbol: 'circle', symbolSize: 6, lineStyle: { width: 2 }, data: totals, itemStyle: { color: '#2456a6' } },
-        { name: cabName, type: 'line', smooth: false, symbol: 'circle', symbolSize: 6, lineStyle: { width: 2 }, data: cabs, itemStyle: { color: '#e6a23c' } },
-        { name: stoneName, type: 'line', smooth: false, symbol: 'circle', symbolSize: 6, lineStyle: { width: 2 }, data: stones, itemStyle: { color: '#67c23a' } },
+        { name: totalName, type: chartType, barMaxWidth:28, smooth: false, symbol: 'circle', symbolSize: 6, lineStyle: { width: 2 }, data: totals, itemStyle: { color: '#2456a6' } },
+        { name: cabName, type: chartType, barMaxWidth:28, smooth: false, symbol: 'circle', symbolSize: 6, lineStyle: { width: 2 }, data: cabs, itemStyle: { color: '#e6a23c' } },
+        { name: stoneName, type: chartType, barMaxWidth:28, smooth: false, symbol: 'circle', symbolSize: 6, lineStyle: { width: 2 }, data: stones, itemStyle: { color: '#67c23a' } },
       ],
     }, true);
     S.dash.chart.resize();
