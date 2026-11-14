@@ -3221,7 +3221,7 @@
     const totalName = LANG === 'zh' ? '总金额' : 'Total';
     const cabName = LANG === 'zh' ? '橱柜金额' : 'Cabinet';
     const stoneName = LANG === 'zh' ? '石材金额' : 'Stone';
-    // BCS_DYNAMIC_BARS_1: grouped amounts, never stack total with its components.
+    // BCS_CUSTOMER_STACK_1; BCS_DYNAMIC_BARS_1: stack only components; show total in tooltip.
     const chartType=S.dash.chartType||'bar';
     const title=document.getElementById('dash-chart-title');
     if(title){
@@ -3230,17 +3230,25 @@
       buttons.innerHTML=['bar','line'].map(k=>'<button class="btn sm'+(chartType===k?' primary':'')+'" data-dash-chart="'+k+'" aria-pressed="'+(chartType===k)+'">'+(LANG==='zh'?(k==='bar'?'柱状图':'折线图'):(k==='bar'?'Bar':'Line'))+'</button>').join('');
       buttons.querySelectorAll('button').forEach(button=>button.onclick=()=>{S.dash.chartType=button.dataset.dashChart;renderDashChart();});
     }
+    const money=v=>Number(v||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+    const blue='#2456a6',orange='#e89016';
+    const tooltip=params=>{
+      const point=Array.isArray(params)?params[0]:params;
+      const i=point?.dataIndex;if(!Number.isInteger(i)||i<0||i>=dd.monthKeys.length)return '';
+      const total=totals[i],pct=v=>total ? (v/total*100).toFixed(2)+'%' : '—';
+      const entry=(name,value,color)=>'<div style="display:flex;gap:18px;justify-content:space-between;margin-top:6px"><span><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:'+color+';margin-right:6px"></span>'+esc(name)+'</span><b>'+money(value)+' <span style="color:#63758b;font-weight:normal">('+pct(value)+')</span></b></div>';
+      return '<b>'+esc(dd.monthKeys[i])+'</b><div style="display:flex;gap:20px;justify-content:space-between;margin-top:8px;border-bottom:1px solid #dce4ed;padding-bottom:7px"><span>'+esc(totalName)+'</span><b>'+money(total)+'</b></div>'+entry(stoneName,stones[i],blue)+entry(cabName,cabs[i],orange);
+    };
+    const component=(name,values,color)=>({name,type:chartType,stack:chartType==='bar'?'customer-sales':undefined,barMaxWidth:48,smooth:false,symbol:'circle',symbolSize:6,lineStyle:{width:2},data:values,itemStyle:{color}});
+    const series=[component(stoneName,stones,blue),component(cabName,cabs,orange)];
+    if(chartType==='line')series.unshift({name:totalName,type:'line',smooth:false,symbol:'circle',symbolSize:6,lineStyle:{width:2},data:totals,itemStyle:{color:'#63758b'}});
     S.dash.chart.setOption({
-      tooltip: { trigger: 'axis',axisPointer:{type:chartType==='bar'?'shadow':'line'},valueFormatter:v=>v==null?'—':Number(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) },
-      legend: { data: [totalName, cabName, stoneName], top: 0 },
+      tooltip: { trigger:'axis',axisPointer:{type:chartType==='bar'?'shadow':'line'},formatter:tooltip },
+      legend: { data:chartType==='bar'?[stoneName,cabName]:[totalName,stoneName,cabName], top:0 },
       grid: { left: 10, right: 16, top: 34, bottom: 10, containLabel: true },
       xAxis: { type: 'category', boundaryGap: chartType==='bar', data: dd.monthKeys, axisLabel: { rotate: 40 } },
       yAxis: { type: 'value', axisLabel: { formatter: (v) => Number(v).toLocaleString('en-US') }, name: LANG === 'zh' ? '销售金额' : 'Amount', nameLocation: 'middle', nameGap: 46 },
-      series: [
-        { name: totalName, type: chartType, barMaxWidth:28, smooth: false, symbol: 'circle', symbolSize: 6, lineStyle: { width: 2 }, data: totals, itemStyle: { color: '#2456a6' } },
-        { name: cabName, type: chartType, barMaxWidth:28, smooth: false, symbol: 'circle', symbolSize: 6, lineStyle: { width: 2 }, data: cabs, itemStyle: { color: '#e6a23c' } },
-        { name: stoneName, type: chartType, barMaxWidth:28, smooth: false, symbol: 'circle', symbolSize: 6, lineStyle: { width: 2 }, data: stones, itemStyle: { color: '#67c23a' } },
-      ],
+      series,
     }, true);
     S.dash.chart.resize();
   }
