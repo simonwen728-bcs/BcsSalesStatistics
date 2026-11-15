@@ -1200,8 +1200,10 @@
   }
 
   // 数字格式补隐藏零段（#,##0.00 → #,##0.00;-#,##0.00;），与「零值不显示」口径一致
+  // BCS_USD_ACCOUNTING_1: USD for generated accounting/currency patterns in every language.
+  const USD_ACCOUNTING_FORMAT = '_($* #,##0.00_);_($* (#,##0.00);_($* "-"??_);_(@_)';
   function zhFmt(fmt) {
-    const f = String(fmt || '');
+    const f = String(fmt || '').replace(/[￥¥]/g,'$');
     if (!f || f === '@' || f.includes(';')) return f;
     return f + ';-' + f + ';';
   }
@@ -1332,16 +1334,21 @@
         st.bd={t:edge,b:edge,l:edge,r:edge};
       }
       if (fixed.n) st.n=fixed.n;
+      const accountingTotal=!isOrders&&(isYear||spec.performancePeriodTemplate>=2)&&r===nr-1&&(c===2||(isYear&&c>=5));
+      if(accountingTotal)st.n={pattern:USD_ACCOUNTING_FORMAT};
+      // BCS_PERFORMANCE_TOTAL_FONT_1
+      if(!isOrders&&(isYear||spec.performancePeriodTemplate>=2)&&r===nr-1&&(c===1||accountingTotal)){st.fs=14;st.bl=1;}
       const percent=!!(fixed.n && fixed.n.pattern.includes('%'));
       const isHeader = r===0 || (isOrders && row[0] === 'Sales 2' && row[1] === 'Sales Order');
       st.ht=isHeader ? 2 : isOrders ? (c===0 ? 1 : [1,2,4,6,8].includes(c) ? 2 : 3) : (isYear?[0,1]:[0,1,5]).includes(c) ? 1 : percent ? 2 : 3;
+      if(!isHeader && (isYear || spec.performancePeriodTemplate>=2) && c===1 && /小计[:：]?$|^总计[:：]?$/.test(String(row[1])))st.ht=3;
       if(isHeader) st.cl={rgb:'#ffffff'};
       cleanGeneratedStyle(st);
       baseline[r+':'+c]=st;
-      return {v:row[c]===0 || row[c]===undefined ? '' : row[c],s:st};
+      return {v:(row[c]===0&&!accountingTotal) || row[c]===undefined ? '' : row[c],s:st};
     }));
     sh.getRange(0,0,nr,nc).setValues(matrix);
-    const widths=Array.from({length:nc},(_,c)=>isYear?([150,220,150,100,100][c]||130):(isOrders ? [150,100,100,180,100,150,100,150,100] : [150,150,180,100,100,150])[c] || 150);
+    const widths=Array.from({length:nc},(_,c)=>isYear?([100,180,150,100,100][c]||130):(isOrders ? [150,100,100,180,100,150,100,150,100] : [100,180,150,100,100,150])[c] || 150);
     widths.forEach((w,c)=>sh.setColumnWidth(c,w));
     sh.showRows(0,nr);
     sh.setRowHeights(0,nr,30);
@@ -2027,7 +2034,7 @@
     const performanceRange = JSON.stringify([opts.start || '',opts.end || '',def.id==='salesPerformance'?(opts.performanceView||'detail'):'',def.id==='salesPerformance'&&opts.performanceView==='year'?opts.performanceYear:'']);
     const priorPerformance = def.id === 'salesPerformance' ? S.statResults[def.id] : null;
     const reusablePerformance = priorPerformance && !priorPerformance.saveFailed &&
-      priorPerformance.performanceAlgorithm === 3 && priorPerformance.performanceRange === performanceRange;
+      priorPerformance.performanceAlgorithm === 6 && priorPerformance.performanceRange === performanceRange;
     const knownPerformanceRevision = reusablePerformance ? priorPerformance.dataRevision || '' : '';
     const priorOrders = def.id === 'customerOrders' ? S.statResults[def.id] : null;
     const reusableOrders = priorOrders && !priorOrders.saveFailed &&
@@ -2184,7 +2191,7 @@
     if (def.id === 'salesPerformance') {
       spec.dataRevision = revision;
       spec.performanceRange = performanceRange;
-      spec.performanceAlgorithm = 3;
+      spec.performanceAlgorithm = 6;
     }
     S.yearToggle = spec.yearGroups ? { sheet: spec.sheet, groups: spec.yearGroups } : null;
     spec.stale = false;
@@ -2248,6 +2255,12 @@
         ws['!cols']=spec.widths.map(x=>({wpx:x[1]}));
         for(let r=1;r<spec.values.length;r++)for(let c=2;c<17;c++){
           const cell=ws[XLSX.utils.encode_cell({r,c})];if(cell&&cell.t==='n')cell.z=[3,4].includes(c)?'0.00%;-0.00%;':'#,##0.00;-#,##0.00;';
+        }
+      }
+      if(spec.performanceYearTemplate || spec.performancePeriodTemplate>=2){
+        const r=spec.values.length-1;
+        for(const c of (spec.performanceYearTemplate?[2,...Array.from({length:12},(_,i)=>i+5)]:[2])){
+          const cell=ws[XLSX.utils.encode_cell({r,c})];if(cell&&cell.t==='n')cell.z=USD_ACCOUNTING_FORMAT;
         }
       }
       if(spec.cabinetColorMatrix===3){
@@ -2484,7 +2497,7 @@
     if(cached && PURCHASE_STATE_REPORT_IDS.includes(def.id) && cached.purchaseRuleVersion!==1){
       await runStat(def,Object.assign({},collectStatOpts(def)),null);return;
     }
-    if(def.id==='salesPerformance' && cached && (cached.stale || cached.performanceAlgorithm!==3)){
+    if(def.id==='salesPerformance' && cached && (cached.stale || cached.performanceAlgorithm!==6)){
       await runStat(def,Object.assign({},collectStatOpts(def)),null);return;
     }
     $('#stat-state').textContent = reportState(cached);

@@ -257,6 +257,9 @@ window.STATS = (function () {
     const reps=opts.reps||{s1:[],s2:[]},s1=new Map(),s2=new Map();
     for(const r of reps.s1||[])s1.set(String(r.code||'').trim().toUpperCase(),{name:String(r.name||r.code||'').trim(),group:canonicalSalesGroup(r.group)});
     for(const r of reps.s2||[])s2.set(String(r.code||'').trim().toUpperCase(),{name:String(r.name||r.code||'').trim(),inside:String(r.group||'').trim().toLowerCase()==='inside'});
+    // BCS_HO_OTHER_TO_SIMON_1: HO with non-Inside Sales2 belongs to Simon, without changing source records.
+    const simonCode=[...s1].find(([code,r])=>r.name.replace(/\s+/g,'').toUpperCase()==='SIMONWEN')?.[0]||'SW';
+    const simonName=s1.get(simonCode)?.name||'SIMON WEN';
     const groups=['House','Other Branch','Outside'],rows=new Map(),totals=Object.fromEntries(groups.map(g=>[g,Array(12).fill(0)])),grand=Array(12).fill(0),ho=Array(12).fill(0);
     for(const r of data){
       const dt=date(r.soldDate);if(!dt||dt.slice(0,4)!==year)continue;
@@ -267,8 +270,8 @@ window.STATS = (function () {
       if(!groups.includes(group))return {error:'请检查销售分组：'+code+' / '+group};
       const m=+dt.slice(5,7)-1;if(m<0||m>11)continue;
       const splitHouse=group==='House'&&code==='HO';
-      const person=splitHouse&&inside?.inside?code2:code;
-      const name=splitHouse?(inside?.inside?inside.name:'HOUSE ACCT（未分配）'):(info?.name||String(r.rep1Name||code).trim());
+      const person=splitHouse?(inside?.inside?code2:simonCode):code;
+      const name=splitHouse?(inside?.inside?inside.name:simonName):(info?.name||String(r.rep1Name||code).trim());
       const key=group+'\u0000'+person;
       if(!rows.has(key))rows.set(key,{group,code:person,name,months:Array(12).fill(0)});
       rows.get(key).months[m]+=cents;totals[group][m]+=cents;grand[m]+=cents;
@@ -283,16 +286,20 @@ window.STATS = (function () {
       spec.performanceYearRows.push({row:spec.values.length-1,kind});
     };
     for(const group of groups){
-      const list=[...rows.values()].filter(r=>r.group===group).sort((a,b)=>a.name.localeCompare(b.name,undefined,{sensitivity:'base',numeric:true})||a.code.localeCompare(b.code));
+      const list=[...rows.values()].filter(r=>r.group===group).sort((a,b)=>{
+        const simon=r=>String(r.name).replace(/\s+/g,'').toUpperCase()==='SIMONWEN';
+        if(group==='House'&&simon(a)!==simon(b))return simon(a)?1:-1;
+        return a.name.localeCompare(b.name,undefined,{sensitivity:'base',numeric:true})||a.code.localeCompare(b.code);
+      });
       for(const r of list)append(group,r.name,r.months,sum(totals[group]),'detail');
-      append(group+' 小计','',totals[group],sum(totals[group]),'subtotal');
+      append('',group+' 小计:',totals[group],sum(totals[group]),'subtotal');
     }
-    append('Sales 1 总计','',grand,0,'grand');append('HO 合计','',ho,0,'ho');
+    append('','总计:',grand,0,'grand');spec.values[spec.values.length-1][3]='';spec.values[spec.values.length-1][4]='';
     const last=spec.values.length;
     spec.bold.push(rng(1,1,1,17));spec.bg.push({range:rng(1,1,1,17),color:'#1f4e78'});
     for(const r of spec.performanceYearRows)if(r.kind!=='detail'){spec.bold.push(rng(r.row+1,1,r.row+1,17));spec.bg.push({range:rng(r.row+1,1,r.row+1,17),color:'#d9eaf7'});}
     spec.numFmt.push({range:'C2:C'+last,fmt:'#,##0.00'},{range:'D2:E'+last,fmt:'0.00%'},{range:'F2:Q'+last,fmt:'#,##0.00'});
-    spec.widths=Array.from({length:17},(_,c)=>[c+1,[150,220,150,100,100][c]||130]);spec.freeze={rows:1,cols:2};return spec;
+    spec.widths=Array.from({length:17},(_,c)=>[c+1,[100,180,150,100,100][c]||130]);spec.freeze={rows:1,cols:2};return spec;
   }
 
   function salesPerformance(data, opts, t) {
@@ -300,6 +307,7 @@ window.STATS = (function () {
     const rg = range(opts.start, opts.end);
     if (!rg.success) return { error: t('statEmpty').replace('{msg}', rg.message) };
     const spec = baseSpec('销售业绩');
+    spec.performancePeriodTemplate=3; // BCS_PERFORMANCE_LABELS_B_1
 
     const reps = opts.reps || { s1: [], s2: [] };
     const sales1Info = {};
@@ -321,7 +329,11 @@ window.STATS = (function () {
       }
     });
 
+    // BCS_PERFORMANCE_INSIDE_FRONT_1: same HO-only attribution as annual summary.
+    const simonCode=Object.keys(sales1Info).find(code=>sales1Info[code].name.replace(/\s+/g,'').toUpperCase()==='SIMONWEN')||'SW';
+    const simonName=sales1Info[simonCode]?.name||'SIMON WEN';
     const sales1Amount = {};
+    const leftInfo = {};
     const matrix = {};
     const sales2Totals = {};
     let grandSales1 = 0;
@@ -340,11 +352,18 @@ window.STATS = (function () {
       }
       const info = sales1Info[sales1];
       if (!info.group || info.group.trim().toUpperCase() === 'IC') return;
-      sales1Amount[sales1] = (sales1Amount[sales1] || 0) + amt;
+      const splitHouse = info.group === 'House' && sales1 === 'HO';
+      const personCode = splitHouse ? (insideSales2.has(sales2) ? sales2 : simonCode) : sales1;
+      const leftCode = info.group + '\u0000' + personCode;
+      if (!leftInfo[leftCode]) leftInfo[leftCode] = {
+        name: splitHouse ? (insideSales2.has(sales2) ? sales2Names[sales2] : simonName) : info.name,
+        group: info.group
+      };
+      sales1Amount[leftCode] = (sales1Amount[leftCode] || 0) + amt;
       grandSales1 += amt;
       if (insideSales2.has(sales2)) {
-        if (!matrix[sales1]) matrix[sales1] = {};
-        matrix[sales1][sales2] = (matrix[sales1][sales2] || 0) + amt;
+        if (!matrix[leftCode]) matrix[leftCode] = {};
+        matrix[leftCode][sales2] = (matrix[leftCode][sales2] || 0) + amt;
         sales2Totals[sales2] = (sales2Totals[sales2] || 0) + amt;
         grandInside += amt;
       }
@@ -353,38 +372,35 @@ window.STATS = (function () {
     const sales2List = Array.from(insideSales2).filter((s2) => sales2Totals[s2] !== 0).sort();
     const groupMap = Object.create(null), groupLabels = Object.create(null);
     Object.keys(sales1Amount).forEach((code) => {
-      const label=canonicalSalesGroup(sales1Info[code].group);
+      const label=canonicalSalesGroup(leftInfo[code].group);
       const g=label.toUpperCase();
       if(!groupLabels[g])groupLabels[g]=label;
       if (!groupMap[g]) groupMap[g] = [];
       groupMap[g].push(code);
     });
     const isHouseGroup = (g) => String(g || '').trim().toLowerCase() === 'house';
-    const groups = Object.keys(groupMap).sort((a, b) => {
-      const ha = isHouseGroup(a), hb = isHouseGroup(b);
-      if (ha && !hb) return -1;
-      if (!ha && hb) return 1;
-      return a.localeCompare(b);
+    const departmentOrder=['HOUSE','OTHER BRANCH','OUTSIDE'];
+    const groups = Object.keys(groupMap).sort((a,b)=>{
+      const ai=departmentOrder.indexOf(a),bi=departmentOrder.indexOf(b);
+      return (ai<0?99:ai)-(bi<0?99:bi)||a.localeCompare(b);
     });
 
-    const leftRows = [['部门1', '销售1', '金额', '部门占比', '总额占比']];
+    const leftRows = [['部门', '销售员', '金额', '部门占比', '总额占比']];
     const subtotalRowIdx = [];
 
     groups.forEach((groupName) => {
       const codes = groupMap[groupName];
-      codes.sort((a, b) => {
-        if (isHouseGroup(groupName)) {
-          if (a === 'HO' && b !== 'HO') return -1;
-          if (a !== 'HO' && b === 'HO') return 1;
-        }
-        return sales1Info[a].name.localeCompare(sales1Info[b].name);
+      codes.sort((a,b)=>{
+        const simon=c=>String(leftInfo[c].name).replace(/\s+/g,'').toUpperCase()==='SIMONWEN';
+        if(isHouseGroup(groupName)&&simon(a)!==simon(b))return simon(a)?1:-1;
+        return leftInfo[a].name.localeCompare(leftInfo[b].name,undefined,{sensitivity:'base',numeric:true})||a.localeCompare(b);
       });
       const groupTotal = codes.reduce((sum, c) => sum + sales1Amount[c], 0);
       codes.forEach((code) => {
         const amt = sales1Amount[code];
-        leftRows.push([groupLabels[groupName], sales1Info[code].name, amt, groupTotal ? amt / groupTotal : 0, grandSales1 ? amt / grandSales1 : 0]);
+        leftRows.push([groupLabels[groupName], leftInfo[code].name, amt, groupTotal ? amt / groupTotal : 0, grandSales1 ? amt / grandSales1 : 0]);
       });
-      leftRows.push([groupLabels[groupName] + ' 小计', '', groupTotal, 1, grandSales1 ? groupTotal / grandSales1 : 0]);
+      leftRows.push(['', groupLabels[groupName] + ' 小计:', groupTotal, 1, grandSales1 ? groupTotal / grandSales1 : 0]);
       subtotalRowIdx.push(leftRows.length);
     });
 
@@ -399,42 +415,9 @@ window.STATS = (function () {
 
     // 右块（各销售2列+Inside 小计+两个占比行）完全由分组表驱动：没有任何 Inside 销售2 时整块省略，
     // 只保留 Sale 1 总计行（无 HO 合计/占比的概念）
-    const rightRows = [];
-    if (sales2List.length) {
-      rightRows.push(['', ...sales2List.map((s2) => sales2Names[s2] || s2)]);
-      for (let r = 1; r < leftRows.length; r++) {
-        const deptLabel = String(leftRows[r][0] || '');
-        const sales1Name = String(leftRows[r][1] || '');
-        if (deptLabel.endsWith(' 小计') || deptLabel.endsWith(' Subtotal')) {
-          const gname = deptLabel.replace(/ (小计|Subtotal)\s*$/, '').trim().toLowerCase();
-          if (gname === 'house') {
-            rightRows.push(['Inside 小计', ...sales2List.map((s2) => houseInsideTotals[s2] || 0)]);
-          } else {
-            rightRows.push(new Array(1 + sales2List.length).fill(''));
-          }
-          continue;
-        }
-        let code = '';
-        Object.keys(sales1Info).some((c) => {
-          if (sales1Info[c].name === sales1Name) { code = c; return true; }
-          return false;
-        });
-        const rr = [''];
-        sales2List.forEach((s2) => rr.push(code && matrix[code] ? matrix[code][s2] || 0 : 0));
-        rightRows.push(rr);
-      }
-    }
-    leftRows.push(['Sale 1 总计', '', grandSales1, '', 1]);
-    if (sales2List.length) {
-      rightRows.push(['部门占比', ...sales2List.map((s2) => (grandHouseInside ? (houseInsideTotals[s2] || 0) / grandHouseInside : 0))]);
-      leftRows.push(['HO 合计', '', grandHouseInside, '', grandSales1 ? grandHouseInside / grandSales1 : 0]);
-      rightRows.push(['总额占比', ...sales2List.map((s2) => (grandSales1 ? (houseInsideTotals[s2] || 0) / grandSales1 : 0))]);
-    }
-
-    const rowCount = Math.max(leftRows.length, rightRows.length);
-    while (leftRows.length < rowCount) leftRows.push(['', '', '', '', '']);
-    while (rightRows.length < rowCount) rightRows.push(sales2List.length ? new Array(1 + sales2List.length).fill('') : []);
-    const output = leftRows.map((row, i) => row.concat(rightRows[i]));
+    // The period report now uses the same five-column layout as the annual summary's left side.
+    leftRows.push(['', '总计:', grandSales1, '', '']);
+    const output = leftRows;
     spec.values = output;
 
     const lastRow = output.length;
@@ -444,12 +427,7 @@ window.STATS = (function () {
     if (lastRow > 1) {
       spec.numFmt.push({ range: 'C2:C' + lastRow, fmt: '#,##0.00' });
       spec.numFmt.push({ range: 'D2:E' + lastRow, fmt: '0.00%' });
-      if (sales2List.length) {
-        // 右块结构：F=行标签列，G..=各销售2数值列 → 金额/百分比从第 7 列起（原从 F 起差一列，最后一列 0 裸露）
-        const c0 = colLetter(7), c1 = colLetter(6 + sales2List.length);
-        spec.numFmt.push({ range: c0 + '2:' + c1 + (lastRow - 2), fmt: '#,##0.00' });
-        spec.numFmt.push({ range: c0 + (lastRow - 1) + ':' + c1 + lastRow, fmt: '0.00%' });
-      }
+
     }
     subtotalRowIdx.forEach((r) => {
       spec.bold.push(rng(r, 1, r, lastCol));
@@ -458,7 +436,7 @@ window.STATS = (function () {
     spec.bold.push(rng(lastRow - 1, 1, lastRow, lastCol));
     spec.bg.push({ range: rng(lastRow - 1, 1, lastRow, lastCol), color: '#d9eaf7' });
     spec.freeze = { rows: 1, cols: 2 };
-    spec.widths = Array.from({ length: lastCol }, (_, c) => [c + 1, [150, 150, 180, 100, 100, 150][c] || 150]);
+    spec.widths = Array.from({ length: lastCol }, (_, c) => [c + 1, [100, 180, 150, 100, 100, 150][c] || 150]);
     return spec;
   }
 
